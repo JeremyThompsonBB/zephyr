@@ -111,6 +111,22 @@
 #define BMP581_DT_IIR_FILTER_COEFF_127	0x07 /**< 127 */
 /** @} */
 
+/**
+ * @defgroup bmp581_interrupt_config BMP581 INT_CONFIG (0x14) interrupt output
+ *
+ * Same encodings as BMP5_INT_{MODE,POL,OD}_* in the sensor driver.
+ * @{
+ */
+#define BMP581_DT_INT_MODE_PULSED	0 /**< Pulsed */
+#define BMP581_DT_INT_MODE_LATCHED	1 /**< Latched */
+
+#define BMP581_DT_INT_ACTIVE_LOW	0 /**< Active low */
+#define BMP581_DT_INT_ACTIVE_HIGH	1 /**< Active high */
+
+#define BMP581_DT_INT_PUSHPULL		0 /**< Push-pull */
+#define BMP581_DT_INT_OPENDRAIN		1 /**< Open-drain */
+/** @} */
+
 /** @} */
 
 #endif /* ZEPHYR_INCLUDE_DT_BINDINGS_BOSCH_BMP581_H_*/
