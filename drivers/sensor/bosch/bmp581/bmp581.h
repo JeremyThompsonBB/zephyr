@@ -13,6 +13,7 @@
 #define ZEPHYR_DRIVERS_SENSOR_BMP581_BMP581_H_
 
 #include <zephyr/device.h>
+#include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/sensor.h>
@@ -336,6 +337,9 @@ struct bmp581_stream {
 	struct rtio_iodev_sqe *iodev_sqe;
 	enum bmp581_event enabled_mask;
 	uint8_t fifo_thres;
+	/** Latched INT clear-on-read target (BMP5_REG_INT_STATUS); see datasheet 4.7.3.2 */
+	uint8_t int_status_scratch;
+	struct k_work latched_int_recover_work;
 	atomic_t state;
 };
 
@@ -349,6 +353,12 @@ struct bmp581_data {
 struct bmp581_config {
 	struct bmp581_bus bus;
 	struct gpio_dt_spec int_gpio;
+	/** BMP5_REG_INT_CONFIG int_mode (pulsed / latched) */
+	uint8_t int_mode;
+	/** BMP5_REG_INT_CONFIG int_pol (active low / high) */
+	uint8_t int_pol;
+	/** BMP5_REG_INT_CONFIG int_od (push-pull / open-drain) */
+	uint8_t int_od;
 };
 
 #endif /* ZEPHYR_DRIVERS_SENSOR_BMP581_BMP581_H_ */

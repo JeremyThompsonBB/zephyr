@@ -610,8 +610,8 @@ static int bmp581_init(const struct device *dev)
 
 #ifdef CONFIG_SENSOR_ASYNC_API
 
-static void bmp581_complete_result(struct rtio *ctx, const struct rtio_sqe *sqe,
-				   int result, void *arg)
+static void bmp581_complete_result(struct rtio *ctx, const struct rtio_sqe *sqe, int result,
+				   void *arg)
 {
 	ARG_UNUSED(result);
 
@@ -662,9 +662,8 @@ static void bmp581_submit_one_shot(const struct device *dev, struct rtio_iodev_s
 
 	struct rtio_sqe *read_sqe;
 
-	err = bmp581_prep_reg_read_rtio_async(&conf->bus, BMP5_REG_TEMP_DATA_XLSB,
-					      edata->payload, sizeof(edata->payload),
-					      &read_sqe);
+	err = bmp581_prep_reg_read_rtio_async(&conf->bus, BMP5_REG_TEMP_DATA_XLSB, edata->payload,
+					      sizeof(edata->payload), &read_sqe);
 	if (err < 0) {
 		LOG_ERR("Failed to prepare async read operation");
 		rtio_iodev_sqe_err(iodev_sqe, err);
@@ -681,10 +680,7 @@ static void bmp581_submit_one_shot(const struct device *dev, struct rtio_iodev_s
 		return;
 	}
 
-	rtio_sqe_prep_callback_no_cqe(complete_sqe,
-				      bmp581_complete_result,
-				      iodev_sqe,
-				      (void *)dev);
+	rtio_sqe_prep_callback_no_cqe(complete_sqe, bmp581_complete_result, iodev_sqe, (void *)dev);
 
 	rtio_submit(conf->bus.rtio.ctx, 0);
 }
@@ -720,35 +716,41 @@ static DEVICE_API(sensor, bmp581_driver_api) = {
 	BUILD_ASSERT(COND_CODE_1(DT_INST_NODE_HAS_PROP(i, fifo_watermark),                         \
 				 (DT_INST_PROP(i, fifo_watermark) > 0 &&                           \
 				  DT_INST_PROP(i, fifo_watermark) < 16),                           \
-				 (true)),                                                          \
-		     "fifo-watermark must be between 1 and 15. Please set it in "                  \
-		     "the device-tree node properties");                                           \
+				 (true)),     \
+			      "fifo-watermark must be between 1 and 15. Please set it in "         \
+			      "the device-tree node properties");                                  \
                                                                                                    \
 	RTIO_DEFINE(bmp581_rtio_ctx_##i, 16, 16);                                                  \
 	I2C_DT_IODEV_DEFINE(bmp581_bus_##i, DT_DRV_INST(i));                                       \
                                                                                                    \
 	static struct bmp581_data bmp581_data_##i = {                                              \
-		.osr_odr_press_config = {                                                          \
-			.press_en = 1,                                                             \
-			.odr = DT_INST_PROP(i, odr),                                               \
-			.osr_t = DT_INST_PROP(i, temp_osr),                                        \
-			.osr_p = DT_INST_PROP(i, press_osr),                                       \
-			.iir_t = DT_INST_PROP(i, temp_iir),                                        \
-			.iir_p = DT_INST_PROP(i, press_iir),                                       \
-			.power_mode = DT_INST_PROP(i, power_mode),                                 \
-		},                                                                                 \
-		.stream = {                                                                        \
-			.fifo_thres = DT_INST_PROP_OR(i, fifo_watermark, 0),                       \
-		},                                                                                 \
+		.osr_odr_press_config =                                                            \
+			{                                                                          \
+				.press_en = 1,                                                     \
+				.odr = DT_INST_PROP(i, odr),                                       \
+				.osr_t = DT_INST_PROP(i, temp_osr),                                \
+				.osr_p = DT_INST_PROP(i, press_osr),                               \
+				.iir_t = DT_INST_PROP(i, temp_iir),                                \
+				.iir_p = DT_INST_PROP(i, press_iir),                               \
+				.power_mode = DT_INST_PROP(i, power_mode),                         \
+			},                                                                         \
+		.stream =                                                                          \
+			{                                                                          \
+				.fifo_thres = DT_INST_PROP_OR(i, fifo_watermark, 0),               \
+			},                                                                         \
 	};                                                                                         \
                                                                                                    \
 	static const struct bmp581_config bmp581_config_##i = {                                    \
-		.bus.rtio = {                                                                      \
-			.ctx = &bmp581_rtio_ctx_##i,                                               \
-			.iodev = &bmp581_bus_##i,                                                  \
-			.type = BMP581_BUS_TYPE_I2C,                                               \
-		},                                                                                 \
+		.bus.rtio =                                                                        \
+			{                                                                          \
+				.ctx = &bmp581_rtio_ctx_##i,                                       \
+				.iodev = &bmp581_bus_##i,                                          \
+				.type = BMP581_BUS_TYPE_I2C,                                       \
+			},                                                                         \
 		.int_gpio = GPIO_DT_SPEC_INST_GET_OR(i, int_gpios, {0}),                           \
+		.int_mode = DT_INST_PROP(i, bosch_int_mode),                                       \
+		.int_pol = DT_INST_PROP(i, bosch_int_output_polarity),                             \
+		.int_od = DT_INST_PROP(i, bosch_int_output_drive),                                 \
 	};                                                                                         \
                                                                                                    \
 	SENSOR_DEVICE_DT_INST_DEFINE(i, bmp581_init, NULL, &bmp581_data_##i, &bmp581_config_##i,   \
