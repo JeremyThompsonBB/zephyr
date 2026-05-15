@@ -176,23 +176,16 @@ static void bmp581_event_handler(const struct device *dev)
 	uint32_t buf_len = 0;
 	int err;
 
-	CHECKIF(!data->stream.iodev_sqe || FIELD_GET(RTIO_SQE_CANCELED, iodev_sqe->sqe.flags)) {
+	if (!data->stream.iodev_sqe) {
+		/* iodev_sqe cleared until next submit; DRDY may still assert. */
+		LOG_DBG("GPIO callback with no active streaming submission; disabling interrupts");
+		goto stream_stop_int;
+	}
 
-		uint8_t val = 0;
-
-		LOG_WRN("Callback triggered with no streaming submission - Disabling interrupts");
-
-		(void)gpio_pin_interrupt_configure_dt(&cfg->int_gpio, GPIO_INT_DISABLE);
-
-		err = bmp581_prep_reg_write_rtio_async(&cfg->bus, BMP5_REG_INT_SOURCE, &val, 1,
-						       NULL);
-		if (err >= 0) {
-			(void)rtio_submit(cfg->bus.rtio.ctx, 0);
-		}
-
-		(void)atomic_set(&data->stream.state, BMP581_STREAM_OFF);
-
-		return;
+	if (FIELD_GET(RTIO_SQE_CANCELED, iodev_sqe->sqe.flags)) {
+		/* After cancel; line may still toggle before mask. */
+		LOG_DBG("DRDY after stream cancel; disabling interrupts");
+		goto stream_stop_int;
 	}
 
 	CHECKIF(atomic_cas(&data->stream.state, BMP581_STREAM_ON, BMP581_STREAM_BUSY) == false) {
@@ -222,7 +215,8 @@ static void bmp581_event_handler(const struct device *dev)
 		struct bmp581_encoded_data *edata = (struct bmp581_encoded_data *)buf;
 		struct rtio_sqe *read_sqe = NULL;
 
-		err = bmp581_prep_reg_read_rtio_async(&cfg->bus, BMP5_REG_TEMP_DATA_XLSB,
+		data->stream.i2c_reg_temp = BMP5_REG_TEMP_DATA_XLSB;
+		err = bmp581_prep_reg_read_rtio_async(&cfg->bus, &data->stream.i2c_reg_temp,
 						      edata->payload, sizeof(edata->payload),
 						      &read_sqe);
 		CHECKIF(err < 0 || !read_sqe) {
@@ -234,9 +228,10 @@ static void bmp581_event_handler(const struct device *dev)
 		if (cfg->int_mode == BMP5_INT_MODE_LATCHED) {
 			struct rtio_sqe *status_read_sqe = NULL;
 
-			err = bmp581_prep_reg_read_rtio_async(&cfg->bus, BMP5_REG_INT_STATUS,
-							      &data->stream.int_status_scratch, 1,
-							      &status_read_sqe);
+			data->stream.i2c_reg_int_status = BMP5_REG_INT_STATUS;
+			err = bmp581_prep_reg_read_rtio_async(
+				&cfg->bus, &data->stream.i2c_reg_int_status,
+				&data->stream.int_status_scratch, 1, &status_read_sqe);
 			CHECKIF(err < 0 || !status_read_sqe) {
 				LOG_ERR("Failed to chain INT_STATUS read: %d", err);
 				bmp581_stream_handler_abort(dev, err < 0 ? err : -ENOMEM);
@@ -262,7 +257,8 @@ static void bmp581_event_handler(const struct device *dev)
 		struct bmp581_encoded_data *edata = (struct bmp581_encoded_data *)buf;
 		struct rtio_sqe *read_sqe = NULL;
 
-		err = bmp581_prep_reg_read_rtio_async(&cfg->bus, BMP5_REG_FIFO_DATA,
+		data->stream.i2c_reg_fifo = BMP5_REG_FIFO_DATA;
+		err = bmp581_prep_reg_read_rtio_async(&cfg->bus, &data->stream.i2c_reg_fifo,
 						      (uint8_t *)edata->frame, len_data, &read_sqe);
 		CHECKIF(err < 0 || !read_sqe) {
 			bmp581_stream_handler_abort(dev, err);
@@ -273,9 +269,10 @@ static void bmp581_event_handler(const struct device *dev)
 		if (cfg->int_mode == BMP5_INT_MODE_LATCHED) {
 			struct rtio_sqe *status_read_sqe = NULL;
 
-			err = bmp581_prep_reg_read_rtio_async(&cfg->bus, BMP5_REG_INT_STATUS,
-							      &data->stream.int_status_scratch, 1,
-							      &status_read_sqe);
+			data->stream.i2c_reg_int_status = BMP5_REG_INT_STATUS;
+			err = bmp581_prep_reg_read_rtio_async(
+				&cfg->bus, &data->stream.i2c_reg_int_status,
+				&data->stream.int_status_scratch, 1, &status_read_sqe);
 			CHECKIF(err < 0 || !status_read_sqe) {
 				LOG_ERR("Failed to chain INT_STATUS read: %d", err);
 				bmp581_stream_handler_abort(dev, err < 0 ? err : -ENOMEM);
@@ -285,22 +282,8 @@ static void bmp581_event_handler(const struct device *dev)
 		}
 
 	} else {
-
-		uint8_t val = 0;
-
 		LOG_ERR("Callback triggered with invalid streaming-config. Disabling interrupts");
-
-		(void)gpio_pin_interrupt_configure_dt(&cfg->int_gpio, GPIO_INT_DISABLE);
-
-		err = bmp581_prep_reg_write_rtio_async(&cfg->bus, BMP5_REG_INT_SOURCE, &val, 1,
-						       NULL);
-		if (err >= 0) {
-			(void)rtio_submit(cfg->bus.rtio.ctx, 0);
-		}
-
-		(void)atomic_set(&data->stream.state, BMP581_STREAM_OFF);
-
-		return;
+		goto stream_stop_int;
 	}
 
 	cb_sqe = rtio_sqe_acquire(cfg->bus.rtio.ctx);
@@ -313,6 +296,20 @@ static void bmp581_event_handler(const struct device *dev)
 	rtio_sqe_prep_callback_no_cqe(cb_sqe, bmp581_stream_event_complete, iodev_sqe, (void *)dev);
 
 	(void)rtio_submit(cfg->bus.rtio.ctx, 0);
+	return;
+
+stream_stop_int:
+	(void)gpio_pin_interrupt_configure_dt(&cfg->int_gpio, GPIO_INT_DISABLE);
+
+	data->stream.wr_int_source_reg = BMP5_REG_INT_SOURCE;
+	data->stream.wr_int_source_data = 0;
+	err = bmp581_prep_reg_write_rtio_async(&cfg->bus, &data->stream.wr_int_source_reg,
+					       &data->stream.wr_int_source_data, 1, NULL);
+	if (err >= 0) {
+		(void)rtio_submit(cfg->bus.rtio.ctx, 0);
+	}
+
+	(void)atomic_set(&data->stream.state, BMP581_STREAM_OFF);
 }
 
 static void bmp581_gpio_callback(const struct device *port, struct gpio_callback *cb, uint32_t pin)
@@ -334,7 +331,11 @@ static inline int bmp581_stream_prep_fifo_wm_async(const struct device *dev)
 	val = BMP5_SET_BITSLICE(0, BMP5_ODR, data->osr_odr_press_config.odr);
 	val = BMP5_SET_BITSLICE(val, BMP5_POWERMODE, 0);
 
-	err = bmp581_prep_reg_write_rtio_async(&cfg->bus, BMP5_REG_ODR_CONFIG, &val, 1, &out_sqe);
+	data->stream.wr_wm_odr_reg = BMP5_REG_ODR_CONFIG;
+	data->stream.wr_wm_odr_data_a = val;
+
+	err = bmp581_prep_reg_write_rtio_async(&cfg->bus, &data->stream.wr_wm_odr_reg,
+					       &data->stream.wr_wm_odr_data_a, 1, &out_sqe);
 	if (err < 0) {
 		return err;
 	}
@@ -345,13 +346,17 @@ static inline int bmp581_stream_prep_fifo_wm_async(const struct device *dev)
 		rtio_sqe_drop_all(cfg->bus.rtio.ctx);
 		return err;
 	}
-	/* Wait until standby mode is effective before proceeding writes */
+	/* STANDBY effective before FIFO setup (t_standby typ. 2.5 ms; use 5 ms). */
 	rtio_sqe_prep_delay(out_sqe, K_MSEC(5), NULL);
 	out_sqe->flags |= RTIO_SQE_CHAINED;
 
 	val = BMP5_SET_BITSLICE(0, BMP5_FIFO_COUNT, data->stream.fifo_thres);
 
-	err = bmp581_prep_reg_write_rtio_async(&cfg->bus, BMP5_REG_FIFO_CONFIG, &val, 1, &out_sqe);
+	data->stream.wr_wm_fifo_cfg_reg = BMP5_REG_FIFO_CONFIG;
+	data->stream.wr_wm_fifo_cfg_data = val;
+
+	err = bmp581_prep_reg_write_rtio_async(&cfg->bus, &data->stream.wr_wm_fifo_cfg_reg,
+					       &data->stream.wr_wm_fifo_cfg_data, 1, &out_sqe);
 	if (err < 0) {
 		return err;
 	}
@@ -359,7 +364,11 @@ static inline int bmp581_stream_prep_fifo_wm_async(const struct device *dev)
 
 	val = BMP5_SET_BITSLICE(0, BMP5_FIFO_FRAME_SEL, BMP5_FIFO_FRAME_SEL_ALL);
 
-	err = bmp581_prep_reg_write_rtio_async(&cfg->bus, BMP5_REG_FIFO_SEL, &val, 1, &out_sqe);
+	data->stream.wr_wm_fifo_sel_reg = BMP5_REG_FIFO_SEL;
+	data->stream.wr_wm_fifo_sel_data = val;
+
+	err = bmp581_prep_reg_write_rtio_async(&cfg->bus, &data->stream.wr_wm_fifo_sel_reg,
+					       &data->stream.wr_wm_fifo_sel_data, 1, &out_sqe);
 	if (err < 0) {
 		return err;
 	}
@@ -368,7 +377,10 @@ static inline int bmp581_stream_prep_fifo_wm_async(const struct device *dev)
 	val = BMP5_SET_BITSLICE(0, BMP5_ODR, data->osr_odr_press_config.odr);
 	val = BMP5_SET_BITSLICE(val, BMP5_POWERMODE, data->osr_odr_press_config.power_mode);
 
-	err = bmp581_prep_reg_write_rtio_async(&cfg->bus, BMP5_REG_ODR_CONFIG, &val, 1, &out_sqe);
+	data->stream.wr_wm_odr_data_b = val;
+
+	err = bmp581_prep_reg_write_rtio_async(&cfg->bus, &data->stream.wr_wm_odr_reg,
+					       &data->stream.wr_wm_odr_data_b, 1, &out_sqe);
 	if (err < 0) {
 		return err;
 	}
@@ -426,7 +438,11 @@ void bmp581_stream_submit(const struct device *dev, struct rtio_iodev_sqe *iodev
 		val = BMP5_SET_BITSLICE(val, BMP5_INT_FIFO_THRES_EN,
 					(enabled_mask & BMP581_EVENT_FIFO_WM) ? 1 : 0);
 
-		err = bmp581_prep_reg_write_rtio_async(&cfg->bus, BMP5_REG_INT_SOURCE, &val, 1,
+		data->stream.wr_int_source_reg = BMP5_REG_INT_SOURCE;
+		data->stream.wr_int_source_data = val;
+
+		err = bmp581_prep_reg_write_rtio_async(&cfg->bus, &data->stream.wr_int_source_reg,
+						       &data->stream.wr_int_source_data, 1,
 						       &int_src_sqe);
 		if (err < 0) {
 			bmp581_stream_result(dev, err);
@@ -439,8 +455,11 @@ void bmp581_stream_submit(const struct device *dev, struct rtio_iodev_sqe *iodev
 		val = BMP5_SET_BITSLICE(val, BMP5_INT_OD, cfg->int_od);
 		val = BMP5_SET_BITSLICE(val, BMP5_INT_EN, 1);
 
-		err = bmp581_prep_reg_write_rtio_async(&cfg->bus, BMP5_REG_INT_CONFIG, &val, 1,
-						       NULL);
+		data->stream.wr_int_config_reg = BMP5_REG_INT_CONFIG;
+		data->stream.wr_int_config_data = val;
+
+		err = bmp581_prep_reg_write_rtio_async(&cfg->bus, &data->stream.wr_int_config_reg,
+						       &data->stream.wr_int_config_data, 1, NULL);
 		if (err < 0) {
 			bmp581_stream_result(dev, err);
 			return;
