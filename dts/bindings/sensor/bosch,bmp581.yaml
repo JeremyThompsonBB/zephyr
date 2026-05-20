@@ -12,10 +12,40 @@ include: [sensor-device.yaml, i2c-device.yaml]
 properties:
   int-gpios:
     type: phandle-array
-    description: Interrupt pin.
+    description: |
+      MCU GPIO to BMP581 INT. GPIO_ACTIVE_* must match bosch,int-output-polarity and wiring
+      (e.g. OD active-low with pull-up -> GPIO_ACTIVE_LOW). Latched bosch,int-mode may need
+      level-sensitive GPIO on some SoCs; see datasheet for latched timing and clear.
 
-      The interrupt pin of BMP581 is open-drain, active low. If connected directly to the MCU,
-      the pin should be configured as pull-up, active low.
+  bosch,int-output-drive:
+    type: int
+    default: 0
+    description: |
+      INT_CONFIG int_od: push-pull (0) or open-drain (1). Default 0 matches prior Zephyr driver;
+      chip POR is often open-drain. Use BMP581_DT_INT_* in bmp581.h.
+    enum:
+      - 0 # BMP581_DT_INT_PUSHPULL
+      - 1 # BMP581_DT_INT_OPENDRAIN
+
+  bosch,int-output-polarity:
+    type: int
+    default: 1
+    description: |
+      INT_CONFIG int_pol: active low (0) or active high (1). Default 1 matches prior Zephyr
+      driver; chip POR is often active low. Use BMP581_DT_INT_* in bmp581.h.
+    enum:
+      - 0 # BMP581_DT_INT_ACTIVE_LOW
+      - 1 # BMP581_DT_INT_ACTIVE_HIGH
+
+  bosch,int-mode:
+    type: int
+    default: 0
+    description: |
+      INT_CONFIG int_mode: pulsed (0) or latched (1). Default 0 matches prior Zephyr driver;
+      latched semantics in datasheet. Use BMP581_DT_INT_* in bmp581.h.
+    enum:
+      - 0 # BMP581_DT_INT_MODE_PULSED
+      - 1 # BMP581_DT_INT_MODE_LATCHED
 
   odr:
     type: int
@@ -143,6 +173,7 @@ properties:
 
 examples:
   - |
+    #include <zephyr/dt-bindings/gpio/gpio.h>
     #include <zephyr/dt-bindings/sensor/bmp581.h>
 
     bmp581@46 {
@@ -153,4 +184,10 @@ examples:
         press-iir = <BMP581_DT_IIR_FILTER_COEFF_7>;
         temp-iir = <BMP581_DT_IIR_FILTER_COEFF_3>;
         power-mode = <BMP581_DT_MODE_NORMAL>;
+
+        /* OD, active-low, pulsed */
+        bosch,int-output-drive = <BMP581_DT_INT_OPENDRAIN>;
+        bosch,int-output-polarity = <BMP581_DT_INT_ACTIVE_LOW>;
+        bosch,int-mode = <BMP581_DT_INT_MODE_PULSED>;
+        int-gpios = <&gpio0 5 GPIO_ACTIVE_LOW>;
     };
