@@ -102,7 +102,7 @@ void nxp_wifi_internal_register_rx_cb(int (*rx_cb_fn)(struct net_if *iface, stru
 	net_internal_rx_callback = rx_cb_fn;
 }
 
-#ifdef CONFIG_NET_DHCPV4
+#ifdef CONFIG_WIFI_STA_AUTO_DHCPV4
 OSA_TIMER_HANDLE_DEFINE(dhcp_timer);
 static void dhcp_timer_cb(osa_timer_arg_t arg);
 #endif
@@ -331,7 +331,7 @@ static mlan_status process_mgmt_packet(t_u8 *data)
 		return MLAN_STATUS_RESOURCE;
 	}
 
-	if (wlan_bypass_802dot11_mgmt_pkt(data) == MLAN_STATUS_SUCCESS) {
+	if (wlan_bypass_802dot11_mgmt_pkt((void *)rxpd) == MLAN_STATUS_SUCCESS) {
 		return MLAN_STATUS_RESOURCE;
 	}
 
@@ -350,6 +350,12 @@ static mlan_status process_mgmt_packet(t_u8 *data)
 		net_d("%s: gen_pkt_from_data fail", __func__);
 		return MLAN_STATUS_FAILURE;
 	}
+
+#ifdef CONFIG_NXP_WIFI_TX_RX_ZERO_COPY
+	/* Skip interface header */
+	net_buf_pull(p->frags, INTF_HEADER_LEN);
+	net_pkt_cursor_init(p);
+#endif
 
 	if (wifi_event_completion(WIFI_EVENT_MGMT_FRAME, WIFI_EVENT_REASON_SUCCESS, p) !=
 	    WM_SUCCESS) {
@@ -633,6 +639,15 @@ int nxp_wifi_internal_tx(const struct device *dev, struct net_pkt *pkt, bool pkt
 	/* Save the ethernet header */
 	net_pkt_set_overwrite(pkt, false);
 	net_pkt_read(pkt, ((outbuf_t *)wmm_outbuf)->eth_header, ETH_HDR_LEN);
+	/* The ETH header has been copied into outbuf->eth_header.
+	 * If the first frag only contained the ETH header, remove it
+	 * to free one tx_buf back to the pool.
+	 */
+	if (pkt->frags != NULL && pkt->frags->len == ETH_HDR_LEN &&
+	    pkt->frags->frags != NULL) {
+		net_pkt_frag_del(pkt, NULL, pkt->frags);
+	}
+
 	((outbuf_t *)wmm_outbuf)->buffer = pkt;
 	/* Save the data payload pointer without ethernet header */
 	if (net_pkt_len > ETH_HDR_LEN) {
@@ -907,7 +922,7 @@ int net_get_if_name_netif(char *pif_name, struct netif *iface)
 	return WM_SUCCESS;
 }
 
-#if defined(CONFIG_NET_DHCPV4)
+#if defined(CONFIG_WIFI_STA_AUTO_DHCPV4)
 void net_stop_dhcp_timer(void)
 {
 	(void)OSA_TimerDeactivate((osa_timer_handle_t)dhcp_timer);
@@ -916,8 +931,10 @@ void net_stop_dhcp_timer(void)
 static void stop_cb(void *ctx)
 {
 	interface_t *if_handle = (interface_t *)net_get_mlan_handle();
-
+#if defined(CONFIG_NET_DHCPV4)
 	net_dhcpv4_stop(if_handle->netif);
+#endif
+
 #ifdef CONFIG_NXP_WIFI_IPV6
 	if (!is_sta_ipv6_connected()) {
 		(void)net_if_dormant_on(if_handle->netif);
@@ -1002,7 +1019,7 @@ static void wifi_net_event_handler(struct net_mgmt_event_callback *cb, uint64_t 
 	case NET_EVENT_IPV6_DAD_SUCCEED:
 		net_d("Receive zephyr ipv6 dad finished event.");
 #if defined(CONFIG_NXP_WIFI_SOFTAP_SUPPORT) && !CONFIG_WIFI_NM_HOSTAPD_AP
-		/* Wi-Fi driver will recevie NET_EVENT_IPV6_DAD_SUCCEED from zephyr kernel after
+		/* Wi-Fi driver will receive NET_EVENT_IPV6_DAD_SUCCEED from zephyr kernel after
 		 * IPV6 DAD finished. Can notify wlcmgr_task task to get address.
 		 */
 		(void)wlan_wlcmgr_send_msg(WIFI_EVENT_UAP_NET_ADDR_CONFIG,
@@ -1055,6 +1072,7 @@ int net_configure_address(struct net_ip_config *addr, void *intrfc_handle)
 
 	switch (addr->ipv4.addr_type) {
 	case NET_ADDR_TYPE_STATIC:
+#if defined(CONFIG_NET_IPV4)
 		if (addr->ipv4.address != 0) {
 			NET_IPV4_ADDR_U32(if_handle->ipaddr) = addr->ipv4.address;
 			NET_IPV4_ADDR_U32(if_handle->nmask) = addr->ipv4.netmask;
@@ -1066,9 +1084,10 @@ int net_configure_address(struct net_ip_config *addr, void *intrfc_handle)
 							&if_handle->ipaddr.in_addr,
 							&if_handle->nmask.in_addr);
 		}
+#endif
 		break;
 	case NET_ADDR_TYPE_DHCP:
-#if defined(CONFIG_NET_DHCPV4)
+#if defined(CONFIG_WIFI_STA_AUTO_DHCPV4)
 		(void)OSA_TimerActivate((osa_timer_handle_t)dhcp_timer);
 		net_dhcpv4_restart(if_handle->netif);
 #endif
@@ -1111,6 +1130,10 @@ int net_configure_address(struct net_ip_config *addr, void *intrfc_handle)
 		 * DAD finished event from zephyr.
 		 */
 		net_if_dormant_off(if_handle->netif);
+#ifndef CONFIG_NXP_WIFI_IPV6
+		(void)wlan_wlcmgr_send_msg(WIFI_EVENT_UAP_NET_ADDR_CONFIG,
+					   WIFI_EVENT_REASON_SUCCESS, NULL);
+#endif
 	}
 #endif
 	else { /* Do Nothing */
@@ -1122,11 +1145,16 @@ int net_configure_address(struct net_ip_config *addr, void *intrfc_handle)
 int net_get_if_addr(struct net_ip_config *addr, void *intrfc_handle)
 {
 	interface_t *if_handle = (interface_t *)intrfc_handle;
+
+#if defined(CONFIG_NET_IPV4)
 	struct net_if_ipv4 *ipv4 = if_handle->netif->config.ip.ipv4;
 
 	addr->ipv4.address = NET_IPV4_ADDR_U32(ipv4->unicast[0].ipv4.address);
 	addr->ipv4.netmask = ipv4->unicast[0].netmask.s_addr;
 	addr->ipv4.gw = ipv4->gw.s_addr;
+#else
+	ARG_UNUSED(if_handle);
+#endif
 
 #ifdef CONFIG_DNS_RESOLVER
 	struct dns_resolve_context *ctx;
@@ -1137,14 +1165,17 @@ int net_get_if_addr(struct net_ip_config *addr, void *intrfc_handle)
 		int i;
 
 		for (i = 0; i < CONFIG_DNS_RESOLVER_MAX_SERVERS; i++) {
-			if (ctx->servers[i].dns_server.sa_family == AF_INET) {
+			struct net_sockaddr *server_addr =
+				net_sad(&ctx->servers[i].dns_server_addr);
+
+			if (ctx->servers[i].dns_server_addr.ss_family == AF_INET) {
 				if (i == 0) {
-					addr->ipv4.dns1 = net_sin(&ctx->servers[i].dns_server)
-								  ->sin_addr.s_addr;
+					addr->ipv4.dns1 =
+						net_sin(server_addr)->sin_addr.s_addr;
 				}
 				if (i == 1) {
-					addr->ipv4.dns2 = net_sin(&ctx->servers[i].dns_server)
-								  ->sin_addr.s_addr;
+					addr->ipv4.dns2 =
+						net_sin(server_addr)->sin_addr.s_addr;
 				}
 			}
 		}
@@ -1309,19 +1340,35 @@ static void net_clear_ipv6_ll_address(void *intrfc_handle)
 
 int net_get_if_ip_addr(uint32_t *ip, void *intrfc_handle)
 {
+#if defined(CONFIG_NET_IPV4)
 	interface_t *if_handle = (interface_t *)intrfc_handle;
 	struct net_if_ipv4 *ipv4 = if_handle->netif->config.ip.ipv4;
 
-	*ip = NET_IPV4_ADDR_U32(ipv4->unicast[0].ipv4.address);
+	if (ipv4 != NULL) {
+		*ip = NET_IPV4_ADDR_U32(ipv4->unicast[0].ipv4.address);
+	} else {
+		*ip = 0U;
+	}
+#else
+	ARG_UNUSED(intrfc_handle);
+	*ip = 0U;
+#endif
+
 	return WM_SUCCESS;
 }
 
 int net_get_if_ip_mask(uint32_t *nm, void *intrfc_handle)
 {
+#if defined(CONFIG_NET_IPV4)
 	interface_t *if_handle = (interface_t *)intrfc_handle;
 	struct net_if_ipv4 *ipv4 = if_handle->netif->config.ip.ipv4;
 
 	*nm = ipv4->unicast[0].netmask.s_addr;
+#else
+	ARG_UNUSED(intrfc_handle);
+	*nm = 0U;
+#endif
+
 	return WM_SUCCESS;
 }
 
@@ -1380,7 +1427,7 @@ static void cleanup_mgmt_events(void)
 int net_wlan_init(void)
 {
 	int ret;
-#if defined(CONFIG_NET_DHCPV4)
+#if defined(CONFIG_WIFI_STA_AUTO_DHCPV4)
 	osa_status_t status;
 #endif
 	wifi_register_data_input_callback(&handle_data_packet);
@@ -1418,7 +1465,7 @@ int net_wlan_init(void)
 		ethernet_init(g_uap.netif);
 #endif
 		net_wlan_init_done = 1;
-#if defined(CONFIG_NET_DHCPV4)
+#if defined(CONFIG_WIFI_STA_AUTO_DHCPV4)
 		status = OSA_TimerCreate((osa_timer_handle_t)dhcp_timer, MSEC_TO_TICK(DHCP_TIMEOUT),
 					 &dhcp_timer_cb, NULL, KOSA_TimerOnce,
 					 OSA_TIMER_NO_ACTIVATE);
@@ -1475,7 +1522,7 @@ static int net_netif_deinit(struct net_if *netif)
 int net_wlan_deinit(void)
 {
 	int ret;
-#if defined(CONFIG_NET_DHCPV4)
+#if defined(CONFIG_WIFI_STA_AUTO_DHCPV4)
 	osa_status_t status;
 #endif
 	if (net_wlan_init_done != 1) {
@@ -1495,7 +1542,7 @@ int net_wlan_deinit(void)
 		return -WM_FAIL;
 	}
 #endif
-#if defined(CONFIG_NET_DHCPV4)
+#if defined(CONFIG_WIFI_STA_AUTO_DHCPV4)
 	status = OSA_TimerDestroy((osa_timer_handle_t)dhcp_timer);
 	if (status != KOSA_StatusSuccess) {
 		net_e("DHCP timer deletion failed");

@@ -19,7 +19,6 @@
 
 #include <zephyr/toolchain.h> /* compiler specific configurations */
 
-#include <zephyr/kernel_structs.h>
 #include <zephyr/toolchain.h>
 #include <zephyr/linker/sections.h>
 #include <zephyr/kernel.h>
@@ -31,7 +30,7 @@
  *
  * This function is invoked when a stack canary error is detected.
  *
- * @return Does not return
+ * @note This function does not return.
  */
 void _StackCheckHandler(void)
 {

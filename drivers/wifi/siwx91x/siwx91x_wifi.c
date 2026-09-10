@@ -24,7 +24,7 @@
 #define SIWX91X_MAX_RTS_THRESHOLD 2347
 #define MAX_24GHZ_CHANNELS 14
 
-LOG_MODULE_REGISTER(siwx91x_wifi);
+LOG_MODULE_REGISTER(siwx91x_wifi, CONFIG_WIFI_LOG_LEVEL);
 
 NET_BUF_POOL_FIXED_DEFINE(siwx91x_tx_pool, 1, _NET_ETH_MAX_FRAME_SIZE, 0, NULL);
 
@@ -265,7 +265,6 @@ static int siwx91x_send(const struct device *dev, struct net_pkt *pkt)
 		return -EIO;
 	}
 
-	net_pkt_unref(pkt);
 	net_buf_unref(buf);
 
 	return 0;
@@ -337,7 +336,7 @@ static int siwx91x_set_config(const struct device *dev,
 			filter_info.command_type = SL_WIFI_MULTICAST_MAC_CLEAR_BIT;
 		}
 
-		status = sl_wifi_configure_multicast_filter(&filter_info);
+		status = sli_wifi_configure_multicast_filter(&filter_info);
 		if (status != SL_STATUS_OK) {
 			LOG_ERR("Failed to %s multicast filter: 0x%x",
 				config->filter.set ? "add" : "remove", status);
@@ -364,11 +363,8 @@ static int siwx91x_set_config(const struct device *dev,
 
 static void siwx91x_ethernet_init(struct net_if *iface)
 {
-	struct ethernet_context *eth_ctx;
-
 	if (IS_ENABLED(CONFIG_WIFI_SILABS_SIWX91X_NET_STACK_NATIVE)) {
-		eth_ctx = net_if_l2_data(iface);
-		eth_ctx->eth_if_type = L2_ETH_IF_TYPE_WIFI;
+		net_eth_set_if_type_wifi(iface);
 		ethernet_init(iface);
 	}
 }
@@ -547,6 +543,13 @@ static void siwx91x_iface_init(struct net_if *iface)
 	ret = sl_wifi_set_advanced_client_configuration(SL_WIFI_CLIENT_INTERFACE, &client_config);
 	if (ret != SL_STATUS_OK) {
 		LOG_ERR("Failed to set advanced client config: 0x%x", ret);
+		return;
+	}
+
+	ret = sl_wifi_set_join_configuration(SL_WIFI_CLIENT_INTERFACE,
+					     SL_WIFI_JOIN_FEAT_PS_CMD_LISTEN_INTERVAL_VALID);
+	if (ret != SL_STATUS_OK) {
+		LOG_ERR("Failed to set join configuration: 0x%x", ret);
 		return;
 	}
 

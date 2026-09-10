@@ -59,12 +59,13 @@ static uint64_t *new_table(void)
 			if (xlat_used_count > xlat_peak_count) {
 				xlat_peak_count = xlat_used_count;
 #ifdef CONFIG_ARM64_MMU_REPORT_XLAT_TABLES_USAGE
-				LOG_INF("xlat tables: peak %u of %d allocated",
-					xlat_used_count, CONFIG_MAX_XLAT_TABLES);
+				MMU_LOG_INF("xlat tables: peak %u of %d allocated",
+					    xlat_used_count, CONFIG_MAX_XLAT_TABLES);
 #endif
 				if (xlat_used_count == XLAT_LOW_WATER_THRESHOLD) {
-					LOG_WRN("xlat tables low: %u of %d in use",
-						xlat_used_count, CONFIG_MAX_XLAT_TABLES);
+					MMU_LOG_WRN("xlat tables low: %u of %d in use",
+						    xlat_used_count,
+						    CONFIG_MAX_XLAT_TABLES);
 				}
 			}
 			MMU_DEBUG("allocating table [%d]%p\n", i, table);
@@ -72,11 +73,7 @@ static uint64_t *new_table(void)
 		}
 	}
 
-#if defined(CONFIG_LOG)
-	LOG_ERR("CONFIG_MAX_XLAT_TABLES is too small");
-#else
-	printk("ERROR: CONFIG_MAX_XLAT_TABLES is too small\n");
-#endif
+	MMU_LOG_ERR("CONFIG_MAX_XLAT_TABLES is too small");
 
 	/* Unfortunately many code paths are not ready for failure */
 	k_panic();
@@ -239,7 +236,7 @@ static void debug_show_pte(uint64_t *pte, unsigned int level)
 
 	uint8_t mem_type = (*pte >> 2) & MT_TYPE_MASK;
 
-	MMU_DEBUG((mem_type == MT_NORMAL) ? "MEM" :
+	MMU_DEBUG((mem_type == MT_NORMAL || mem_type == MT_NORMAL_WT) ? "MEM" :
 		  ((mem_type == MT_NORMAL_NC) ? "NC" : "DEV"));
 	MMU_DEBUG((*pte & PTE_BLOCK_DESC_AP_RO) ? "-RO" : "-RW");
 	MMU_DEBUG((*pte & PTE_BLOCK_DESC_NS) ? "-NS" : "-S");
@@ -363,9 +360,9 @@ static int set_mapping(uint64_t *top_table, uintptr_t virt, size_t size,
 		}
 
 		if (!may_overwrite && !is_free_desc(*pte)) {
-			LOG_ERR("entry already in use: "
-				"level %d pte %p *pte 0x%016llx",
-				level, pte, *pte);
+			MMU_LOG_ERR("entry already in use: "
+				    "level %d pte %p *pte 0x%016llx",
+				    level, pte, *pte);
 			return -EBUSY;
 		}
 
@@ -744,6 +741,7 @@ static uint64_t get_region_desc(uint32_t attrs)
 		break;
 	case MT_NORMAL_NC:
 	case MT_NORMAL:
+	case MT_NORMAL_WT:
 		/* Make Normal RW memory as execute never */
 		if ((attrs & MT_RW) || (attrs & MT_P_EXECUTE_NEVER)) {
 			desc |= PTE_BLOCK_DESC_PXN;
@@ -761,7 +759,7 @@ static uint64_t get_region_desc(uint32_t attrs)
 		}
 #endif
 
-		if (mem_type == MT_NORMAL) {
+		if (mem_type == MT_NORMAL || mem_type == MT_NORMAL_WT) {
 			desc |= PTE_BLOCK_DESC_INNER_SHARE;
 		} else {
 			desc |= PTE_BLOCK_DESC_OUTER_SHARE;
@@ -870,6 +868,18 @@ static const struct arm_mmu_flat_range mmu_zephyr_ranges[] = {
 	  .end   = _nocache_ram_end,
 	  .attrs = MT_NORMAL_NC | MT_P_RW_U_RW | MT_DEFAULT_SECURE_STATE },
 #endif
+
+#if defined(CONFIG_COVERAGE_GCOV) && defined(CONFIG_USERSPACE)
+	/* GCOV code coverage accounting area. Instrumented code updates the
+	 * counters from user mode too, so the region needs User read-write
+	 * permissions. Placed after "zephyr_data" so it overrides the
+	 * kernel-only mapping for this sub-range.
+	 */
+	{ .name  = "gcov_bss",
+	  .start = __gcov_bss_start,
+	  .end   = __gcov_bss_end,
+	  .attrs = MT_NORMAL | MT_P_RW_U_RW | MT_DEFAULT_SECURE_STATE },
+#endif
 };
 
 static inline void add_arm_mmu_flat_range(struct arm_mmu_ptables *ptables,
@@ -909,6 +919,37 @@ static const struct arm_mmu_region mmu_dt_regions[] = {
 
 DT_FOREACH_STATUS_OKAY(zephyr_memory_region, ARM64_MMU_VALIDATE_DT_REGION)
 
+/*
+ * The GIC is accessed through flat physical addresses by the interrupt
+ * controller driver (see GIC_DIST_BASE & friends) during early boot, before
+ * any driver gets a chance to map it through the device MMIO API. Its register
+ * banks must therefore already be present in the page tables the moment the MMU
+ * is enabled. Map every reg bank of the GIC node here so that individual SoCs
+ * no longer have to repeat these entries in their own mmu_regions.c.
+ *
+ * The banks are mapped as privileged-only (no EL0 access) device memory in the
+ * default secure state. This is the only sensible configuration: the GIC is
+ * managed exclusively by the kernel and is never accessed from user mode. It
+ * supersedes the per-SoC GIC entries that used to exist.
+ *
+ * Note this only covers the GIC node's own reg banks. A separate node such as
+ * the GICv3 ITS (arm,gic-v3-its) is intentionally not included here: the ITS
+ * driver maps that node through device_map(), so SoCs should not add static
+ * ITS entries.
+ */
+#define GIC_MMU_REGION_ENTRY_BY_IDX(idx, node_id)				\
+	MMU_REGION_FLAT_ENTRY("GIC",						\
+			      DT_REG_ADDR_BY_IDX(node_id, idx),			\
+			      DT_REG_SIZE_BY_IDX(node_id, idx),			\
+			      MT_DEVICE_nGnRnE | MT_P_RW_U_NA | MT_DEFAULT_SECURE_STATE)
+
+static const struct arm_mmu_region mmu_gic_regions[] = {
+#if DT_HAS_COMPAT_STATUS_OKAY(arm_gic)
+	LISTIFY(DT_NUM_REGS(DT_INST(0, arm_gic)),
+		GIC_MMU_REGION_ENTRY_BY_IDX, (,), DT_INST(0, arm_gic))
+#endif
+};
+
 static inline void max_region_bounds(const struct arm_mmu_region *regions,
 				     size_t count,
 				     uintptr_t *max_va, uintptr_t *max_pa)
@@ -943,6 +984,8 @@ static void setup_page_tables(struct arm_mmu_ptables *ptables)
 			  &max_va, &max_pa);
 	max_region_bounds(mmu_dt_regions, ARRAY_SIZE(mmu_dt_regions),
 			  &max_va, &max_pa);
+	max_region_bounds(mmu_gic_regions, ARRAY_SIZE(mmu_gic_regions),
+			  &max_va, &max_pa);
 
 	__ASSERT(max_va <= (1ULL << CONFIG_ARM64_VA_BITS),
 		 "Maximum VA not supported\n");
@@ -963,6 +1006,8 @@ static void setup_page_tables(struct arm_mmu_ptables *ptables)
 			mmu_config.num_regions, MT_NO_OVERWRITE);
 	map_mmu_regions(ptables, mmu_dt_regions,
 			ARRAY_SIZE(mmu_dt_regions), MT_NO_OVERWRITE);
+	map_mmu_regions(ptables, mmu_gic_regions,
+			ARRAY_SIZE(mmu_gic_regions), MT_NO_OVERWRITE);
 
 	invalidate_tlb_all();
 }
@@ -1248,17 +1293,50 @@ int arch_mem_domain_init(struct k_mem_domain *domain)
 	struct arm_mmu_ptables *domain_ptables = &domain->arch.ptables;
 	k_spinlock_key_t key;
 	uint16_t asid;
+	uint16_t candidate;
+	bool found = false;
 
 	MMU_DEBUG("%s\n", __func__);
 
 	key = k_spin_lock(&xlat_lock);
 
 	/*
-	 * Pick a new ASID. We use round-robin
-	 * Note: `next_asid` is an uint16_t and `VM_ASID_BITS` could
-	 *  be up to 16, hence `next_asid` might overflow to 0 below.
+	 * Find a free ASID. The round-robin counter may point to an ASID
+	 * still in use by a live domain, so scan domain_list and advance
+	 * until an unused ASID is found.
 	 */
-	asid = next_asid++;
+	candidate = next_asid;
+	do {
+		sys_snode_t *node;
+		struct arch_mem_domain *arch_domain;
+		bool in_use = false;
+
+		SYS_SLIST_FOR_EACH_NODE(&domain_list, node) {
+			arch_domain = CONTAINER_OF(node, struct arch_mem_domain, node);
+			if (get_asid(arch_domain->ptables.ttbr0) == candidate) {
+				in_use = true;
+				break;
+			}
+		}
+
+		if (!in_use) {
+			asid = candidate;
+			found = true;
+			break;
+		}
+
+		candidate++;
+		if ((candidate >= (1UL << VM_ASID_BITS)) || (candidate == 0)) {
+			candidate = 1;
+		}
+	} while (candidate != next_asid);
+
+	if (!found) {
+		k_spin_unlock(&xlat_lock, key);
+		return -ENOMEM;
+	}
+
+	next_asid = candidate + 1;
 	if ((next_asid >= (1UL << VM_ASID_BITS)) || (next_asid == 0)) {
 		next_asid = 1;
 	}
@@ -1288,6 +1366,12 @@ int arch_mem_domain_deinit(struct k_mem_domain *domain)
 
 	key = k_spin_lock(&xlat_lock);
 
+	/*
+	 * Invalidate all TLB entries to flush residual translations
+	 * tagged with this domain's ASID. Without this, stale entries
+	 * could match a new domain reusing the same ASID.
+	 */
+	invalidate_tlb_all();
 	sys_slist_find_and_remove(&domain_list, &domain->arch.node);
 
 	discard_table(domain_ptables->base_xlat_table, BASE_XLAT_LEVEL);
@@ -1453,17 +1537,26 @@ void z_arm64_swap_mem_domains(struct k_thread *incoming)
 #endif /* CONFIG_USERSPACE */
 
 #ifdef CONFIG_DEMAND_PAGING
+/*
+ * The TLBI VAE1 address field is VA[55:12] regardless of the
+ * translation granule (ARM ARM), so the operand is always
+ * virt >> TLBI_VA_SHIFT, not virt >> PAGE_SIZE_SHIFT.
+ */
+#define TLBI_VA_SHIFT 12
+
 static inline void invalidate_tlb_page(uintptr_t virt)
 {
 #ifdef CONFIG_SMP
 	/* Use IS variant to broadcast to all CPUs in Inner Shareable domain */
-	__asm__ volatile (
-	"dsb ishst; tlbi vae1is, %0; dsb ish; isb"
-	: : "r" (virt >> PAGE_SIZE_SHIFT) : "memory");
+	__asm__ volatile("dsb ishst; tlbi vae1is, %0; dsb ish; isb"
+			 :
+			 : "r"(virt >> TLBI_VA_SHIFT)
+			 : "memory");
 #else
-	__asm__ volatile (
-	"dsb ishst; tlbi vae1, %0; dsb ish; isb"
-	: : "r" (virt >> PAGE_SIZE_SHIFT) : "memory");
+	__asm__ volatile("dsb ishst; tlbi vae1, %0; dsb ish; isb"
+			 :
+			 : "r"(virt >> TLBI_VA_SHIFT)
+			 : "memory");
 #endif
 }
 

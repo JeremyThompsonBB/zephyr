@@ -332,6 +332,13 @@ do {                                                                    \
 #define HAS_BUILTIN___builtin_mul_overflow 1
 #define HAS_BUILTIN___builtin_div_overflow 1
 #endif
+#if TOOLCHAIN_GCC_VERSION >= 40800
+#define HAS_BUILTIN___builtin_bswap16 1
+#endif
+#if TOOLCHAIN_GCC_VERSION >= 40300
+#define HAS_BUILTIN___builtin_bswap32 1
+#define HAS_BUILTIN___builtin_bswap64 1
+#endif
 #if __GNUC__ >= 4
 #define HAS_BUILTIN___builtin_clz 1
 #define HAS_BUILTIN___builtin_clzl 1
@@ -345,6 +352,15 @@ do {                                                                    \
  * Be *very* careful with these. You cannot filter out __DEPRECATED_MACRO with
  * -wno-deprecated, which has implications for -Werror.
  */
+
+/**
+ * @brief Request the compiler to fully unroll a loop up to @p n iterations.
+ *
+ * @param n Maximum iteration count (must be a literal integer).
+ */
+#ifndef TOOLCHAIN_PRAGMA_UNROLL
+#define TOOLCHAIN_PRAGMA_UNROLL(n) _Pragma("GCC unroll " #n)
+#endif
 
 /*
  * Expands to nothing and generates a warning. Used like
@@ -673,6 +689,7 @@ do {                                                                    \
 #define TOOLCHAIN_WARNING_ARRAY_BOUNDS             "-Warray-bounds"
 #define TOOLCHAIN_WARNING_ATTRIBUTES               "-Wattributes"
 #define TOOLCHAIN_WARNING_DELETE_NON_VIRTUAL_DTOR  "-Wdelete-non-virtual-dtor"
+#define TOOLCHAIN_WARNING_DEPRECATED_DECLARATIONS  "-Wdeprecated-declarations"
 #define TOOLCHAIN_WARNING_EXTRA                    "-Wextra"
 #define TOOLCHAIN_WARNING_NONNULL                  "-Wnonnull"
 #define TOOLCHAIN_WARNING_SHADOW                   "-Wshadow"

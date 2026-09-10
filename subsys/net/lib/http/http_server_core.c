@@ -196,6 +196,10 @@ static int setup_h3_socket(const struct http_service_desc *svc, int af,
 	int quic_sock;
 	int ret;
 
+	if (!IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3)) {
+		return -ENOTSUP;
+	}
+
 	if (net_sin(addr)->sin_port == 0) {
 		NET_ERR("No local port specified for QUIC service");
 		return -EINVAL;
@@ -232,6 +236,7 @@ static int setup_h3_socket(const struct http_service_desc *svc, int af,
 	}
 
 #if defined(CONFIG_HTTP_SERVER_TLS_USE_ALPN)
+#if defined(CONFIG_HTTP_SERVER_VERSION_3)
 		if (zsock_setsockopt(quic_sock, ZSOCK_SOL_TLS, ZSOCK_TLS_ALPN_LIST,
 				     h3_alpn_list, sizeof(h3_alpn_list)) < 0) {
 			ret = -errno;
@@ -239,8 +244,44 @@ static int setup_h3_socket(const struct http_service_desc *svc, int af,
 			zsock_close(quic_sock);
 			goto out;
 	}
+#endif /* defined(CONFIG_HTTP_SERVER_VERSION_3) */
 #endif /* defined(CONFIG_HTTP_SERVER_TLS_USE_ALPN) */
 #endif /* defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS) */
+
+	if (svc->config != NULL) {
+		int enable_tickets =
+			svc->config->h3.enable_session_tickets ||
+			svc->config->h3.max_early_data_size > 0U;
+
+		if (enable_tickets != 0) {
+			if (zsock_setsockopt(quic_sock, ZSOCK_SOL_QUIC,
+					     ZSOCK_QUIC_SO_SESSION_TICKET_ENABLE,
+					     &enable_tickets,
+					     sizeof(enable_tickets)) < 0) {
+				ret = -errno;
+				LOG_ERR("%s: setsockopt(%s): %d", "h3",
+					"QUIC_SO_SESSION_TICKET_ENABLE", ret);
+				zsock_close(quic_sock);
+				goto out;
+			}
+		}
+
+		if (svc->config->h3.max_early_data_size > 0U) {
+			uint32_t max_early_data_size =
+				svc->config->h3.max_early_data_size;
+
+			if (zsock_setsockopt(quic_sock, ZSOCK_SOL_QUIC,
+					     ZSOCK_QUIC_SO_MAX_EARLY_DATA_SIZE,
+					     &max_early_data_size,
+					     sizeof(max_early_data_size)) < 0) {
+				ret = -errno;
+				LOG_ERR("%s: setsockopt(%s): %d", "h3",
+					"QUIC_SO_MAX_EARLY_DATA_SIZE", ret);
+				zsock_close(quic_sock);
+				goto out;
+			}
+		}
+	}
 
 	ret = quic_sock;
 out:
@@ -915,6 +956,7 @@ static void restore_h3_stream_state(struct http_client_ctx *client, int slot)
 	client->current_detail = stream->current_detail;
 	memcpy(client->url_buffer, stream->url_buffer, sizeof(client->url_buffer));
 	client->method = stream->method;
+	client->header_capture_ctx = stream->header_capture_ctx;
 }
 
 static void store_h3_stream_state(struct http_client_ctx *client, int slot)
@@ -926,6 +968,7 @@ static void store_h3_stream_state(struct http_client_ctx *client, int slot)
 	stream->current_detail = client->current_detail;
 	memcpy(stream->url_buffer, client->url_buffer, sizeof(stream->url_buffer));
 	stream->method = client->method;
+	stream->header_capture_ctx = client->header_capture_ctx;
 }
 
 static int add_h3_stream_poll(struct http_client_ctx *client,
@@ -1050,7 +1093,7 @@ static void handle_listen_pollin(struct http_server_ctx *ctx, int i)
 		return;
 	}
 
-	if (is_h3_conn) {
+	if (IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3) && is_h3_conn) {
 		if (ctx->fds[i].fd != *service->fd_h3) {
 			return;
 		}
@@ -1091,7 +1134,7 @@ static void handle_listen_pollin(struct http_server_ctx *ctx, int i)
 		LOG_DBG("Init client #%d", idx);
 		init_client_ctx(&ctx->clients[idx], service, new_socket);
 
-		if (is_h3_conn) {
+		if (IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3) && is_h3_conn) {
 			int ret;
 
 			ctx->clients[idx].is_h3 = true;
@@ -1420,7 +1463,15 @@ static int http_server_run(struct http_server_ctx *ctx)
 		}
 
 		if (ret == 0) {
-			break; /* timeout -1 should never produce 0, but be safe */
+			/* With an infinite timeout zsock_poll() can still return
+			 * 0 when a wake source fired but no fd reported an event.
+			 * Re-poll instead of breaking: the break path skips
+			 * close_all_sockets(), leaking the sockets and leaving
+			 * the client inactivity timers armed, which the caller's
+			 * re-init then memsets - corrupting the kernel timeout
+			 * list.
+			 */
+			continue;
 		}
 
 		/* Stop event on fds[0] */

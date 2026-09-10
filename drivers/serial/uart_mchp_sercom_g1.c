@@ -893,14 +893,16 @@ static bool uart_mchp_handle_rx_error(const struct device *dev, sercom_registers
 				      bool is_clock_external)
 {
 	uart_mchp_dev_data_t *const dev_data = dev->data;
+	uint32_t uart_err = uart_get_err(dev);
 
-	if (uart_get_err(dev) == 0) {
+	if (uart_err == 0) {
 		return false;
 	}
 
 	if (dev_data->async_cb != NULL) {
 		struct uart_event evt = {
 			.type = UART_RX_STOPPED,
+			.data.rx_stop.reason = uart_err,
 		};
 		dev_data->async_cb(dev, &evt, dev_data->async_cb_data);
 	}
@@ -1624,9 +1626,8 @@ static void uart_mchp_irq_err_disable(const struct device *dev)
  * This function clears sticky interrupts and updates the TX complete cache.
  *
  * @param dev Pointer to the device structure.
- * @return Always returns 1.
  */
-static int uart_mchp_irq_update(const struct device *dev)
+static void uart_mchp_irq_update(const struct device *dev)
 {
 	/* Clear sticky interrupts */
 	const uart_mchp_dev_cfg_t *const cfg = dev->config;
@@ -1641,8 +1642,6 @@ static int uart_mchp_irq_update(const struct device *dev)
 	 */
 	dev_data->is_tx_completed_cache = uart_is_tx_complete(regs, is_clock_external);
 	uart_clear_interrupts(regs, is_clock_external);
-
-	return 1;
 }
 
 /**

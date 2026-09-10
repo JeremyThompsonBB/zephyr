@@ -101,7 +101,7 @@ typedef void (*coap_client_response_cb_t)(const struct coap_client_response_data
  * payload pointer, payload size and information whether more data blocks are expected.
  * Setting the @p last_block parameter to false on the initial callback call triggers
  * a block transfer upload. The library will keep calling the callback until the
- * @p last_block parameter is set to false.
+ * @p last_block parameter is set to true.
  *
  * @note If block transfer is used, the application is expected to provide full blocks of
  * payload. Only the final block (i.e. when @p last_block is set to true) can be shorter
@@ -184,6 +184,7 @@ struct coap_client_internal_request {
 	uint8_t request_tkl;
 	bool request_ongoing;
 	atomic_t in_callback;
+	int unreported_error;
 	struct coap_block_context recv_blk_ctx;
 	struct coap_block_context send_blk_ctx;
 	struct coap_pending pending;
@@ -303,7 +304,7 @@ int coap_client_deregister_observe(struct coap_client *client, struct coap_clien
 /**
  * @brief Initialise a Block2 option to be added to a request
  *
- * If the application expects a request to require a blockwise transfer, it may pre-emptively
+ * If the application expects a request to require a blockwise transfer, it may preemptively
  * suggest a maximum block size to the server - see RFC7959 Figure 3: Block-Wise GET with Early
  * Negotiation.
  *

@@ -195,6 +195,7 @@ struct net_config_ssh_key {
  *        This buffer is needed for loading and saving keys.
  *        The buffer can be shared between private and public key configurations if needed,
  *        but it must be big enough to hold the key data for both configurations.
+ * @param _key_buf_len Size of the key buffer in bytes.
  * @param _key_name SSH key name. This is used when saving or loading keys to
  *        identify them. The key name cannot contain spaces.
  * @param _key_id Key id. This is used to identify the key.
@@ -229,6 +230,7 @@ struct net_config_ssh_key {
  *        This buffer is needed for loading and saving keys.
  *        The buffer can be shared between private and public key configurations if needed,
  *        but it must be big enough to hold the key data for both configurations.
+ * @param _key_buf_len Size of the key buffer in bytes.
  * @param _key_name SSH key name. This is used when saving or loading keys to
  *        identify them. The key name cannot contain spaces.
  * @param _key_id Key id. This is used to identify the key.
@@ -255,7 +257,7 @@ struct net_config_ssh_key {
  * @param priv_key_config Private key configuration for the SSH server.
  * @param pub_key_config Public key configuration for the SSH server.
  * @param password_auth_config Password authentication configuration for the SSH server.
- *        If using public key authetication, then this can be left as NULL or
+ *        If using public key authentication, then this can be left as NULL or
  *        with NULL username and password. The public key authentication will have higher
  *        priority than password authentication, so if both are configured, then password
  *        authentication will only be used if public key authentication fails.

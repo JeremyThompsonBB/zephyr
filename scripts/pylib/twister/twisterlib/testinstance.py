@@ -14,16 +14,16 @@ import logging
 import os
 import random
 import re
-from enum import Enum
 
 from twisterlib.constants import (
+    PYTEST_HARNESSES,
     SUPPORTED_HARNESSES,
     SUPPORTED_SIMS,
     SUPPORTED_SIMS_IN_PYTEST,
     SUPPORTED_SIMS_WITH_EXEC,
 )
 from twisterlib.environment import TwisterEnv
-from twisterlib.error import BuildError, StatusAttributeError, TwisterException
+from twisterlib.error import BuildError, TwisterException
 from twisterlib.handlers import (
     BinaryHandler,
     DeviceHandler,
@@ -37,13 +37,13 @@ from twisterlib.hardwaremap import HardwareMap
 from twisterlib.hardwareutil import HardwareReservationManager
 from twisterlib.platform import Platform
 from twisterlib.size_calc import SizeCalculator
-from twisterlib.statuses import TwisterStatus
+from twisterlib.statuses import StatusMixin, TwisterStatus
 from twisterlib.testsuite import TestCase, TestSuite
 
 logger = logging.getLogger('twister')
 
 
-class TestInstance:
+class TestInstance(StatusMixin):
     """Class representing the execution of a particular TestSuite on a platform
 
     @param test The TestSuite object we want to build/execute
@@ -105,6 +105,9 @@ class TestInstance:
         self.required_applications = []
         self.required_build_dirs = []
         self.reserved_duts: list[CompoundHardwareData] = []
+        # Sidecar attached to this instance; defaults to the testsuite `sidecar:`
+        # field but twister may set it itself (e.g. to attach ivshmem coverage).
+        self.sidecar = testsuite.sidecar
 
     def setup_run_id(self):
         self.run_id = self._get_run_id()
@@ -127,19 +130,6 @@ class TestInstance:
                                     quoting = csv.QUOTE_NONNUMERIC)
                 cw.writeheader()
                 cw.writerows(self.recording)
-
-    @property
-    def status(self) -> TwisterStatus:
-        return self._status
-
-    @status.setter
-    def status(self, value : TwisterStatus) -> None:
-        # Check for illegal assignments by value
-        try:
-            key = value.name if isinstance(value, Enum) else value
-            self._status = TwisterStatus[key]
-        except KeyError as err:
-            raise StatusAttributeError(self.__class__, value) from err
 
     def add_filter(self, reason, filter_type):
         self.filters.append({'type': filter_type, 'reason': reason })
@@ -271,13 +261,16 @@ class TestInstance:
         simulation = options.sim_name
 
         simulator = self.platform.simulator_by_name(simulation)
-        if os.name == 'nt' and simulator:
+        if os.name == 'nt' and simulator and simulator.name not in ('na', 'qemu'):
             # running on simulators is currently supported only for QEMU on Windows
-            if simulator.name not in ('na', 'qemu'):
-                return False
+            return False
 
-            # check presence of QEMU on Windows
-            if simulator.name == 'qemu' and 'QEMU_BIN_PATH' not in os.environ:
+        # QEMU_BIN_PATH is optional and acts as an override.
+        # Validate it only when explicitly provided.
+        if simulator and simulator.name == 'qemu':
+            qemu_bin_path = os.environ.get('QEMU_BIN_PATH')
+
+            if qemu_bin_path is not None and not os.path.exists(qemu_bin_path):
                 return False
 
         # we asked for build-only on the command line
@@ -297,7 +290,7 @@ class TestInstance:
                             device_testing)
 
         # check if test is runnable in pytest
-        if self.testsuite.harness in ['pytest', 'shell', 'power', 'display_capture']:
+        if self.testsuite.harness in PYTEST_HARNESSES:
             target_ready = bool(
                 filter == 'runnable' or simulator and simulator.name in SUPPORTED_SIMS_IN_PYTEST
             )
@@ -331,13 +324,28 @@ class TestInstance:
 
         return testsuite_runnable and target_ready
 
+    @staticmethod
+    def platform_supports_semihost(platform):
+        """Whether the platform can write coverage data over semihosting.
+
+        Semihosting is implemented for ARM, RISC-V and Xtensa targets and is
+        exercised through QEMU's automatic -semihosting-config switch, so limit
+        the per-test semihost transport to QEMU-simulated targets on those
+        architectures.
+        """
+        return (
+            platform.arch in ("arm", "arm64", "riscv", "riscv32", "riscv64", "xtensa")
+            and platform.simulation == "qemu"
+        )
+
     def create_overlay(
         self,
         platform,
         enable_asan=False,
         enable_ubsan=False,
         enable_coverage=False,
-        coverage_platform=None
+        coverage_platform=None,
+        coverage_per_test=False
     ):
         if coverage_platform is None:
             coverage_platform = []
@@ -388,6 +396,13 @@ class TestInstance:
             for cp in coverage_platform:
                 if cp in platform.aliases:
                     content = content + "\nCONFIG_COVERAGE=y"
+                    if coverage_per_test:
+                        content = content + "\nCONFIG_ZTEST_COVERAGE_PER_TEST=y"
+                        if self.platform_supports_semihost(platform):
+                            # Route the per-test dumps to the host filesystem via
+                            # semihosting instead of the serial console.
+                            content = content + "\nCONFIG_SEMIHOST=y"
+                            content = content + "\nCONFIG_COVERAGE_SEMIHOST=y"
 
         if platform.type == "native":
             if enable_asan:
@@ -432,7 +447,7 @@ class TestInstance:
         fns = glob.glob(os.path.join(build_dir, "zephyr", "*.elf"))
         fns.extend(glob.glob(os.path.join(build_dir, "testbinary")))
         blocklist = [
-                'remapped', # used for xtensa plaforms
+                'remapped', # used for xtensa platforms
                 'zefi', # EFI for Zephyr
                 'qemu', # elf files generated after running in qemu
                 '_pre']
@@ -457,8 +472,12 @@ class TestInstance:
     def update_reserved_duts_with_required_applications(self):
         if len(self.reserved_duts) < len(self.testsuite.harness_config.required_devices) + 1:
             raise TwisterException("Not enough DUTs reserved for the required devices.")
+        if not self.testsuite.build:
+            self.reserved_duts[0].build_dir = self.required_build_dirs[0]
         for id, req_dev in enumerate(self.testsuite.harness_config.required_devices):
             if not (req_dev.application or req_dev.platform):
+                if not self.testsuite.build:
+                    self.reserved_duts[id + 1].build_dir = self.required_build_dirs[0]
                 # if neither application nor platform is specified, use the same application
                 continue
             if platform_name := req_dev.platform:

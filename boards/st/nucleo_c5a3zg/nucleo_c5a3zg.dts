@@ -21,6 +21,7 @@
 		zephyr,code-partition = &slot0_partition;
 		zephyr,shell-uart = &lpuart1;
 		zephyr,sram = &sram1;
+		zephyr,system-timer = &lptim1;
 		zephyr,flash = &flash0;
 	};
 
@@ -129,6 +130,11 @@
 	status = "okay";
 };
 
+&clk48 {
+	clocks = <&rcc STM32_SRC_HSE CK48_SEL(3)>;
+	status = "okay";
+};
+
 &fdcan1 {
 	clocks = <&rcc STM32_CLOCK(APB1_2, 9)>,
 		 <&rcc STM32_SRC_PSIK FDCAN_SEL(2)>;
@@ -176,12 +182,16 @@
 &i2c1 {
 	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 6 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 7 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 };
 
 &i2c2 {
 	pinctrl-0 = <&i2c2_scl_pb10 &i2c2_sda_pb4>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 10 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 4 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 };
 
@@ -201,6 +211,12 @@
 };
 
 &lpdma1 {
+	status = "okay";
+};
+
+&lptim1 {
+	clocks = <&rcc STM32_CLOCK(APB3, 11)>,
+		 <&rcc STM32_SRC_LSE LPTIM1_SEL(2)>;
 	status = "okay";
 };
 
@@ -249,8 +265,6 @@
 };
 
 &rng {
-	clocks = <&rcc STM32_CLOCK(AHB2, 18)>,
-		 <&rcc STM32_SRC_CK48 CK48_SEL(2)>;
 	status = "okay";
 };
 
@@ -276,8 +290,6 @@
 };
 
 zephyr_udc0: &usb {
-	clocks = <&rcc STM32_CLOCK(APB2, 24)>,
-		 <&rcc STM32_SRC_CK48 CK48_SEL(2)>;
 	pinctrl-0 = <&usb_dm_pa11 &usb_dp_pa12>;
 	pinctrl-names = "default";
 	status = "okay";

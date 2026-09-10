@@ -9,12 +9,12 @@ import logging
 import mmap
 import os
 import re
-from enum import Enum
 from pathlib import Path
+from typing import Any
 
-from twisterlib.constants import canonical_zephyr_base
-from twisterlib.error import StatusAttributeError, TwisterException, TwisterRuntimeError
-from twisterlib.statuses import TwisterStatus
+from twisterlib.constants import PYTEST_HARNESSES, canonical_zephyr_base
+from twisterlib.error import TwisterException, TwisterRuntimeError
+from twisterlib.statuses import StatusMixin, TwisterStatus
 from twisterlib.testsuitedata import HarnessConfig, RequiredApplication
 
 logger = logging.getLogger('twister')
@@ -375,29 +375,17 @@ def _find_src_dir_path(test_dir_path):
     return ""
 
 
-class TestCase:
+class TestCase(StatusMixin):
+    """Class representing a single test case."""
     __test__ = False
 
-    def __init__(self, name):
-        self.duration = 0
+    def __init__(self, name: str) -> None:
         self.name = name
-        self._status = TwisterStatus.NONE
-        self.reason = None
-        self.output = ""
-        self.freeform = False
-
-    @property
-    def status(self) -> TwisterStatus:
-        return self._status
-
-    @status.setter
-    def status(self, value : TwisterStatus) -> None:
-        # Check for illegal assignments by value
-        try:
-            key = value.name if isinstance(value, Enum) else value
-            self._status = TwisterStatus[key]
-        except KeyError as err:
-            raise StatusAttributeError(self.__class__, value) from err
+        self.duration: float = 0
+        self._status: TwisterStatus = TwisterStatus.NONE
+        self.reason: str | None = None
+        self.output: str = ""
+        self.freeform: bool = False
 
     def __lt__(self, other):
         return self.name < other.name
@@ -409,12 +397,19 @@ class TestCase:
         return self.name
 
 
-class TestSuite:
+class TestSuite(StatusMixin):
     """Class representing a test application."""
 
     __test__ = False
 
-    def __init__(self, suite_root, suite_path, name, data=None, detailed_test_id=True):
+    def __init__(
+        self,
+        suite_root: str | Path,
+        suite_path: str | Path,
+        name: str,
+        data: dict[str, Any] | None = None,
+        detailed_test_id: bool = True
+    ) -> None:
         """TestSuite constructor.
 
         This gets called by TestPlan as it finds and reads test yaml files.
@@ -454,23 +449,15 @@ class TestSuite:
         self._status = TwisterStatus.NONE
 
         self.harness_config: HarnessConfig | None = None
+        self.sidecar: str | None = None
+        # Per-sidecar configuration, namespaced by sidecar name (see the
+        # `sidecar_config` schema key). Left as a raw dict here; each sidecar
+        # coerces its own block into a typed config when it is configured.
+        self.sidecar_config: dict = {}
         self.required_applications: list[RequiredApplication] = []
 
         if data:
             self.load(data)
-
-    @property
-    def status(self) -> TwisterStatus:
-        return self._status
-
-    @status.setter
-    def status(self, value : TwisterStatus) -> None:
-        # Check for illegal assignments by value
-        try:
-            key = value.name if isinstance(value, Enum) else value
-            self._status = TwisterStatus[key]
-        except KeyError as err:
-            raise StatusAttributeError(self.__class__, value) from err
 
     def load(self, data):
         for k, v in data.items():
@@ -537,15 +524,26 @@ Tests should reference the category and subsystem with a dot as a separator.
                     )
         return True
 
-    def update_required_applications(self):
-        """Update the list of required applications based on the harness configuration."""
+    def resolve_required_applications(self):
+        """Validate and update the list of required applications."""
+        if not self.build:
+            if self.harness not in PYTEST_HARNESSES + ['bsim']:
+                msg = f"{self.name}: `build: false` not supported with {self.harness} harness"
+                logger.error(msg)
+                raise TwisterException(msg)
+            if not self.required_applications:
+                msg = f"{self.name}: `build: false` set but no required applications specified"
+                logger.error(msg)
+                raise TwisterException(msg)
+
         for req_dev in self.harness_config.required_devices:
             if not (req_dev.application or req_dev.platform):
                 # if neither application nor platform is specified, use the same application
                 continue
-
-            req_app = RequiredApplication(name=req_dev.application or self.id)
-            if req_dev.platform:
-                req_app.platform = req_dev.platform
+            req_app = RequiredApplication(
+                application=req_dev.application or self.id,
+                platform=req_dev.platform,
+                path=req_dev.path
+            )
             if req_app not in self.required_applications:
                 self.required_applications.append(req_app)

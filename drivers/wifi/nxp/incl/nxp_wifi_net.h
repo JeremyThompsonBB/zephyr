@@ -29,7 +29,7 @@
 #endif
 #endif
 #ifdef CONFIG_NET_DHCPV4_SERVER
-#include "zephyr/net/dhcpv4_server.h"
+#include <zephyr/net/dhcpv4_server.h>
 #endif
 #include <mlan_api.h>
 #include <wmlog.h>
@@ -99,7 +99,7 @@ struct netif {
  */
 struct ethernetif {
 	struct net_eth_addr ethaddr;
-	/* Interface to bss type identification that tells the FW wherether
+	/* Interface to bss type identification that tells the FW whether
 	 * the data is for STA for UAP
 	 */
 	uint8_t interface;
@@ -240,7 +240,7 @@ int wrapper_wlan_handle_rx_packet(t_u16 datalen, RxPD * rxpd, void *p, void *pay
 void user_recv_monitor_data(void *p, RxPD * rxpd, t_u16 intf_pkt_len);
 #endif
 
-#if defined(CONFIG_NET_DHCPV4)
+#if defined(CONFIG_WIFI_STA_AUTO_DHCPV4)
 /* Deactivate the dhcp timer
  */
 void net_stop_dhcp_timer(void);

@@ -81,7 +81,7 @@ static const struct net_route_table_ops route_ipv6_ops = {
 };
 
 struct net_route_entry *net_route_ipv6_lookup(struct net_if *iface,
-					      struct net_in6_addr *dst)
+					      const struct net_in6_addr *dst)
 {
 	struct net_addr addr = route_ipv6_addr(dst);
 
@@ -91,7 +91,7 @@ struct net_route_entry *net_route_ipv6_lookup(struct net_if *iface,
 struct net_route_entry *net_route_ipv6_add(struct net_if *iface,
 					   struct net_in6_addr *addr,
 					   uint8_t prefix_len,
-					   struct net_in6_addr *nexthop,
+					   const struct net_in6_addr *nexthop,
 					   uint32_t lifetime,
 					   uint8_t preference)
 {
@@ -121,7 +121,7 @@ int net_route_ipv6_del(struct net_route_entry *route)
 }
 
 int net_route_ipv6_del_by_nexthop(struct net_if *iface,
-				  struct net_in6_addr *nexthop)
+				  const struct net_in6_addr *nexthop)
 {
 	struct net_addr addr = route_ipv6_addr(nexthop);
 
@@ -253,7 +253,9 @@ int net_route_ipv6_mcast_forward_packet(struct net_pkt *pkt,
 	int ret = 0;
 	int err = 0;
 
+	/* Decrement hop limit; required for forwarding. */
 	hdr->hop_limit--;
+	net_pkt_set_ipv6_hop_limit(pkt, hdr->hop_limit);
 
 	ARRAY_FOR_EACH_PTR(route_mcast_entries, route) {
 		struct net_pkt *pkt_cpy = NULL;
@@ -272,7 +274,7 @@ int net_route_ipv6_mcast_forward_packet(struct net_pkt *pkt,
 				continue;
 			}
 
-			pkt_cpy = net_pkt_shallow_clone(pkt, K_NO_WAIT);
+			pkt_cpy = net_pkt_clone(pkt, K_NO_WAIT);
 			if (pkt_cpy == NULL) {
 				err--;
 				continue;
@@ -290,6 +292,10 @@ int net_route_ipv6_mcast_forward_packet(struct net_pkt *pkt,
 			}
 		}
 	}
+
+	/* Restore initial hop limit for further processing. */
+	hdr->hop_limit++;
+	net_pkt_set_ipv6_hop_limit(pkt, hdr->hop_limit);
 
 	return (err == 0) ? ret : err;
 }
@@ -416,7 +422,7 @@ net_route_ipv6_mcast_lookup_by_iface(struct net_in6_addr *group,
 #endif /* CONFIG_NET_IPV6_ROUTE_MCAST */
 
 bool net_route_ipv6_get_info(struct net_if *iface,
-			     struct net_in6_addr *dst,
+			     const struct net_in6_addr *dst,
 			     struct net_route_entry **route,
 			     struct net_in6_addr **nexthop)
 {
@@ -424,7 +430,9 @@ bool net_route_ipv6_get_info(struct net_if *iface,
 
 	if (net_ipv6_nbr_lookup(iface, dst) != NULL) {
 		*route = NULL;
-		*nexthop = dst;
+
+		/* The cast is needed to avoid changing lot of code all over the place */
+		*nexthop = (struct net_in6_addr *)dst;
 		return true;
 	}
 
@@ -447,20 +455,71 @@ bool net_route_ipv6_get_info(struct net_if *iface,
 	return true;
 }
 
-int net_route_ipv6_packet(struct net_pkt *pkt, struct net_in6_addr *nexthop)
+int net_route_ipv6_decrement_hop_limit(struct net_pkt *pkt)
+{
+	struct net_ipv6_hdr *hdr;
+
+	NET_ASSERT(pkt);
+
+	hdr = NET_IPV6_HDR(pkt);
+	if (hdr == NULL) {
+		return -EINVAL;
+	}
+
+	if (hdr->hop_limit <= 1U) {
+		return -ETIMEDOUT;
+	}
+
+	hdr->hop_limit--;
+	net_pkt_set_ipv6_hop_limit(pkt, hdr->hop_limit);
+
+	return 0;
+}
+
+int net_route_ipv6_packet(struct net_pkt *pkt, const struct net_in6_addr *nexthop)
 {
 	struct net_linkaddr *lladdr = NULL;
+	struct net_if *orig_iface;
+	struct net_if *out_iface;
 	struct net_nbr *nbr;
+	bool forwarding;
+
+	if (pkt == NULL || nexthop == NULL || net_pkt_iface(pkt) == NULL) {
+		return -EINVAL;
+	}
+
+	out_iface = net_pkt_iface(pkt);
 
 	nbr = net_ipv6_nbr_lookup(NULL, nexthop);
 	if (nbr == NULL) {
-		NET_DBG("Cannot find %s neighbor", net_sprint_ipv6_addr(nexthop));
-		return -ENOENT;
+		if (net_route_ll_addr_supported(out_iface)) {
+			NET_DBG("Cannot find %s neighbor",
+				net_sprint_ipv6_addr(nexthop));
+			return -ENOENT;
+		}
+	} else {
+		out_iface = nbr->iface;
 	}
 
-	if (net_route_ll_addr_supported(nbr->iface) &&
+	orig_iface = net_pkt_orig_iface(pkt);
+	forwarding = net_pkt_forwarding(pkt);
+
+	if (orig_iface != NULL) {
+		forwarding = IS_ENABLED(CONFIG_NET_IPV6_FORWARDING) &&
+			     orig_iface != out_iface;
+		net_pkt_set_forwarding(pkt, forwarding);
+	}
+
+	if (nbr != NULL &&
+	    net_route_ll_addr_supported(out_iface) &&
 	    net_route_ll_addr_supported(net_pkt_iface(pkt)) &&
 	    net_route_ll_addr_supported(net_pkt_orig_iface(pkt))) {
+		if (nbr->idx == NET_NBR_LLADDR_UNKNOWN) {
+			NET_DBG("Neighbor %s has no link-layer (idx unknown)",
+				net_sprint_ipv6_addr(nexthop));
+			return -ESRCH;
+		}
+
 		lladdr = net_nbr_get_lladdr(nbr->idx);
 		if (lladdr == NULL) {
 			NET_DBG("Cannot find %s neighbor link layer address.",
@@ -480,7 +539,15 @@ int net_route_ipv6_packet(struct net_pkt *pkt, struct net_in6_addr *nexthop)
 		}
 	}
 
-	net_pkt_set_forwarding(pkt, true);
+	if (forwarding) {
+		int ret = net_route_ipv6_decrement_hop_limit(pkt);
+
+		if (ret < 0) {
+			return ret;
+		}
+	}
+
+	net_pkt_set_iface(pkt, out_iface);
 
 	if (net_route_ll_addr_supported(net_pkt_iface(pkt))) {
 		(void)net_linkaddr_copy(net_pkt_lladdr_src(pkt),
@@ -490,8 +557,6 @@ int net_route_ipv6_packet(struct net_pkt *pkt, struct net_in6_addr *nexthop)
 	if (lladdr != NULL) {
 		(void)net_linkaddr_copy(net_pkt_lladdr_dst(pkt), lladdr);
 	}
-
-	net_pkt_set_iface(pkt, nbr->iface);
 
 	return net_send_data(pkt);
 }

@@ -268,6 +268,21 @@ SECTION_FUNC(exception.entry, _isr_wrapper)
 	 * Notably QEMU when a CSR instruction is involved.
 	 */
 	bnez t2, 1f
+#ifdef CONFIG_RISCV_NO_MTVAL_ON_FP_TRAP_UNALIGNED
+	/* The CPU may not be capable of loading an unaligned instruction with lw,
+	 * but would've been capable of executing it.
+	 */
+	/* Check if instruction is word-aligned */
+	andi t2, t0, 3
+	beqz t2, 2f
+	/* Instruction is not aligned, fetch each halfword separately and concat into instruction */
+	lhu t2, 2(t0)
+	slli t2, t2, 16
+	lhu t1, 0(t0)
+	or t2, t2, t1
+	j 1f
+2:
+#endif
 	lw t2, 0(t0)		/* t0 = RV_EPC */
 1:
 #endif
@@ -582,7 +597,7 @@ is_user_syscall:
 	 */
 	lr a0, ___cpu_t_current_OFFSET(s0)
 	call z_riscv_pmp_kernelmode_enable
-#endif
+#endif /* CONFIG_PMP_KERNEL_MODE_DYNAMIC */
 
 	/* It is safe to re-enable IRQs now */
 	csrs RV_STATUS, STATUS_IE
@@ -669,7 +684,7 @@ is_interrupt:
 1:
 #endif
 2:
-#endif
+#endif /* CONFIG_PMP_KERNEL_MODE_DYNAMIC */
 
 	/* Increment _current_cpu->nested */
 	lw t1, ___cpu_t_nested_OFFSET(s0)
@@ -860,7 +875,7 @@ fp_trap_exit:
 	/* Remove kernel mode configuration and Reconfigure PMP for user mode */
 	lr a0, ___cpu_t_current_OFFSET(s0)
 	call z_riscv_pmp_usermode_enable
-#endif
+#endif /* CONFIG_PMP_KERNEL_MODE_DYNAMIC */
 
 #ifdef CONFIG_CUSTOM_STACK_GUARD
 	/* Disable the custom stack guard in user mode */

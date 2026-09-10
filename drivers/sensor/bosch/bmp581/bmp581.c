@@ -15,9 +15,12 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/i3c.h>
+#include <zephyr/drivers/spi.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
 #include <zephyr/sys/check.h>
 #include <zephyr/sys/util.h>
 
@@ -29,7 +32,6 @@ LOG_MODULE_REGISTER(bmp581, CONFIG_SENSOR_LOG_LEVEL);
 
 static int power_up_check(const struct device *dev);
 static int get_nvm_status(uint8_t *nvm_status, const struct device *dev);
-static int get_interrupt_status(uint8_t *int_status, const struct device *dev);
 static int validate_chip_id(struct bmp581_data *drv);
 static int get_osr_odr_press_config(struct bmp581_osr_odr_press_config *osr_odr_press_cfg,
 				    const struct device *dev);
@@ -40,6 +42,27 @@ static int soft_reset(const struct device *dev);
 static int set_iir_config(const struct sensor_value *iir, const struct device *dev);
 static int get_power_mode(enum bmp5_powermode *powermode, const struct device *dev);
 static int set_power_mode(enum bmp5_powermode powermode, const struct device *dev);
+
+#ifdef CONFIG_SENSOR_ASYNC_API
+#ifdef CONFIG_PM_DEVICE
+static int bmp581_pm_busy_check(const struct device *dev)
+{
+	enum pm_device_state state;
+
+	(void)pm_device_state_get(dev, &state);
+	if (state != PM_DEVICE_STATE_ACTIVE) {
+		return -EBUSY;
+	}
+	return 0;
+}
+#else /* CONFIG_PM_DEVICE */
+static inline int bmp581_pm_busy_check(const struct device *dev)
+{
+	ARG_UNUSED(dev);
+	return 0;
+}
+#endif /* CONFIG_PM_DEVICE */
+#endif /* CONFIG_SENSOR_ASYNC_API */
 
 static int set_power_mode(enum bmp5_powermode powermode, const struct device *dev)
 {
@@ -76,6 +99,12 @@ static int set_power_mode(enum bmp5_powermode powermode, const struct device *de
 				LOG_DBG("Failed to set power mode to BMP5_POWERMODE_STANDBY.");
 				return ret;
 			}
+
+			if (current_powermode == BMP5_POWERMODE_DEEP_STANDBY) {
+				k_usleep(BMP5_DELAY_US_STARTUP_DEEP);
+			} else {
+				k_usleep(BMP5_DELAY_US_STANDBY);
+			}
 		}
 	}
 
@@ -93,9 +122,21 @@ static int set_power_mode(enum bmp5_powermode powermode, const struct device *de
 	case BMP5_POWERMODE_NORMAL:
 	case BMP5_POWERMODE_FORCED:
 	case BMP5_POWERMODE_CONTINUOUS:
+		/* `odr` is only read above when leaving non-STANDBY; refresh if we started in
+		 * STANDBY.
+		 */
+		if (current_powermode == BMP5_POWERMODE_STANDBY) {
+			ret = bmp581_reg_read_rtio(&conf->bus, BMP5_REG_ODR_CONFIG, &odr, 1);
+			if (ret != BMP5_OK) {
+				break;
+			}
+		}
 		odr = BMP5_SET_BITSLICE(odr, BMP5_DEEP_DISABLE, BMP5_DEEP_DISABLED);
 		odr = BMP5_SET_BITS_POS_0(odr, BMP5_POWERMODE, powermode);
 		ret = bmp581_reg_write_rtio(&conf->bus, BMP5_REG_ODR_CONFIG, &odr, 1);
+		if (ret == BMP5_OK) {
+			k_usleep(BMP5_DELAY_US_STARTUP);
+		}
 		break;
 	default:
 		/* invalid power mode */
@@ -167,38 +208,29 @@ static int get_power_mode(enum bmp5_powermode *powermode, const struct device *d
 
 static int power_up_check(const struct device *dev)
 {
-	int8_t rslt = 0;
-	uint8_t nvm_status = 0;
+	int ret;
 
 	CHECKIF(dev == NULL) {
 		return -EINVAL;
 	}
 
-	rslt = get_nvm_status(&nvm_status, dev);
+	/* DS004: NVM ready can lag after reset/power-up (poll using t_NVM read interval). */
+	for (int attempt = 0; attempt < 24; attempt++) {
+		uint8_t nvm_status = 0;
 
-	if (rslt == BMP5_OK) {
-		/* Check if nvm_rdy status = 1 and nvm_err status = 0 to proceed */
-		if ((nvm_status & BMP5_INT_NVM_RDY) != 0 && (nvm_status & BMP5_INT_NVM_ERR) == 0) {
-			rslt = BMP5_OK;
-		} else {
-			rslt = -EFAULT;
+		ret = get_nvm_status(&nvm_status, dev);
+		if (ret != BMP5_OK) {
+			return ret;
 		}
+
+		if ((nvm_status & BMP5_INT_NVM_RDY) != 0 && (nvm_status & BMP5_INT_NVM_ERR) == 0) {
+			return BMP5_OK;
+		}
+
+		k_usleep(BMP5_DELAY_US_NVM_READY_READ);
 	}
 
-	return rslt;
-}
-
-static int get_interrupt_status(uint8_t *int_status, const struct device *dev)
-{
-	const struct bmp581_config *conf;
-
-	CHECKIF(int_status == NULL || dev == NULL) {
-		return -EINVAL;
-	}
-
-	conf = (const struct bmp581_config *)dev->config;
-
-	return bmp581_reg_read_rtio(&conf->bus, BMP5_REG_INT_STATUS, int_status, 1);
+	return -EFAULT;
 }
 
 static int get_nvm_status(uint8_t *nvm_status, const struct device *dev)
@@ -216,20 +248,15 @@ static int get_nvm_status(uint8_t *nvm_status, const struct device *dev)
 
 static int validate_chip_id(struct bmp581_data *drv)
 {
-	int8_t rslt = 0;
-
 	CHECKIF(drv == NULL) {
 		return -EINVAL;
 	}
 
 	if (drv->chip_id == BMP5_CHIP_ID_PRIM || drv->chip_id == BMP5_CHIP_ID_SEC) {
-		rslt = BMP5_OK;
-	} else {
-		drv->chip_id = 0;
-		rslt = -ENODEV;
+		return BMP5_OK;
 	}
 
-	return rslt;
+	return -ENODEV;
 }
 
 /*!
@@ -361,32 +388,53 @@ static int set_odr_config(const struct sensor_value *odr, const struct device *d
 
 static int soft_reset(const struct device *dev)
 {
-	struct bmp581_config *conf = (struct bmp581_config *)dev->config;
-	int ret = 0;
-	const uint8_t reset_cmd = BMP5_SOFT_RESET_CMD;
-	uint8_t int_status = 0;
-
 	CHECKIF(dev == NULL) {
 		return -EINVAL;
 	}
 
-	ret = bmp581_reg_write_rtio(&conf->bus, BMP5_REG_CMD, &reset_cmd, 1);
+	struct bmp581_config *conf = (struct bmp581_config *)dev->config;
+	int ret;
+	uint8_t int_status = 0;
+	const uint8_t reset_cmd = BMP5_SOFT_RESET_CMD;
+	uint8_t reset_wr[2] = {BMP5_REG_CMD, BMP5_SOFT_RESET_CMD};
 
-	if (ret == BMP5_OK) {
-		k_usleep(BMP5_DELAY_US_SOFT_RESET);
-		ret = get_interrupt_status(&int_status, dev);
-		if (ret == BMP5_OK) {
-			if ((int_status & BMP5_INT_ASSERTED_POR_SOFTRESET_COMPLETE) != 0) {
-				ret = BMP5_OK;
-			} else {
-				ret = -EFAULT;
-			}
-		}
+	if (conf->bus.rtio.type == BMP581_BUS_TYPE_I2C) {
+		/* Soft reset: one blocking write (reg + cmd); avoid multi-SQE RTIO here. */
+		ret = bmp581_bus_i2c_burst_write(&conf->bus, reset_wr, sizeof(reset_wr));
 	} else {
-		LOG_DBG("Failed perform soft-reset.");
+		ret = bmp581_reg_write_rtio(&conf->bus, BMP5_REG_CMD, &reset_cmd, 1);
 	}
 
-	return ret;
+	if (ret != 0) {
+		return ret;
+	}
+
+	k_usleep(BMP5_DELAY_US_SOFT_RESET);
+
+	/*
+	 * Soft-reset returns the device to its power-up I2C/I3C mode.
+	 * Re-issue the SPI dummy read to switch the interface back to
+	 * SPI before reading the reset status.
+	 */
+	if (conf->bus.rtio.type == BMP581_BUS_TYPE_SPI) {
+		uint8_t dummy = 0;
+
+		ret = bmp581_reg_read_rtio(&conf->bus, BMP5_REG_CHIP_ID, &dummy, 1);
+		if (ret != BMP5_OK) {
+			return ret;
+		}
+	}
+
+	ret = bmp581_reg_read_rtio(&conf->bus, BMP5_REG_INT_STATUS, &int_status, 1);
+	if (ret != 0) {
+		return ret;
+	}
+
+	if ((int_status & BMP5_INT_ASSERTED_POR_SOFTRESET_COMPLETE) != 0) {
+		return BMP5_OK;
+	}
+
+	return -EFAULT;
 }
 
 static int bmp581_sample_fetch(const struct device *dev, enum sensor_channel chan)
@@ -492,7 +540,7 @@ static int set_iir_config(const struct sensor_value *iir, const struct device *d
 	dsp_config[0] = BMP5_SET_BITSLICE(dsp_config[0], BMP5_SHDW_SET_IIR_PRESS, BMP5_ENABLE);
 
 	/* Configure IIR filter */
-	dsp_config[1] = iir->val1;
+	dsp_config[1] = BMP5_SET_BITSLICE(dsp_config[1], BMP5_SET_IIR_TEMP, iir->val1);
 	dsp_config[1] = BMP5_SET_BITSLICE(dsp_config[1], BMP5_SET_IIR_PRESS, iir->val2);
 
 	/* Set IIR configuration */
@@ -553,9 +601,24 @@ static int bmp581_init(const struct device *dev)
 	struct bmp581_config *conf = (struct bmp581_config *)dev->config;
 	int ret = -1;
 
+	/* t_powup: no bus traffic until delay after supplies valid (DS004). */
+	k_usleep(BMP5_DELAY_US_POWER_UP_FIRST);
+
 	/* Reset the chip id. */
 	drv->chip_id = 0;
 	memset(&drv->last_sample, 0, sizeof(drv->last_sample));
+
+	/*
+	 * After power-up the BMP581 primary interface is I2C/I3C. To switch to SPI
+	 * mode the host must perform a dummy SPI read with CSB asserted for at least
+	 * 16 SCK cycles; the returned data is invalid and must be discarded.
+	 * See datasheet sections 5.1 "Protocol Selection" and 5.5 "SPI Protocol".
+	 */
+	if (conf->bus.rtio.type == BMP581_BUS_TYPE_SPI) {
+		uint8_t dummy = 0;
+
+		(void)bmp581_reg_read_rtio(&conf->bus, BMP5_REG_CHIP_ID, &dummy, 1);
+	}
 
 	ret = soft_reset(dev);
 	if (ret != BMP5_OK) {
@@ -563,26 +626,34 @@ static int bmp581_init(const struct device *dev)
 		return ret;
 	}
 
-	ret = bmp581_reg_read_rtio(&conf->bus, BMP5_REG_CHIP_ID, &drv->chip_id, 1);
+	ret = power_up_check(dev);
+	if (ret != BMP5_OK) {
+		LOG_ERR("BMP581 NVM status check failed: %d", ret);
+		return ret;
+	}
+
+	/* Chip ID after NVM ready (ordered bring-up). */
+	uint8_t chip_id_byte = 0;
+
+	ret = bmp581_reg_read_rtio(&conf->bus, BMP5_REG_CHIP_ID, &chip_id_byte, 1);
 	if (ret != BMP5_OK) {
 		LOG_ERR("Failed to read chip ID: %d", ret);
 		return ret;
 	}
 
-	if (drv->chip_id != 0) {
-		ret = power_up_check(dev);
-		if (ret == BMP5_OK) {
-			ret = validate_chip_id(drv);
-			if (ret != BMP5_OK) {
-				LOG_ERR("Unexpected chip id (%x). Expected (%x or %x)",
-					drv->chip_id, BMP5_CHIP_ID_PRIM, BMP5_CHIP_ID_SEC);
-			}
-		}
-	} else {
-		/* that means something went wrong */
-		LOG_ERR("Unexpected chip id (%x). Expected (%x or %x)", drv->chip_id,
-			BMP5_CHIP_ID_PRIM, BMP5_CHIP_ID_SEC);
+	if (chip_id_byte == 0) {
+		LOG_ERR("Unexpected chip id (0). Expected (%#02x or %#02x)", BMP5_CHIP_ID_PRIM,
+			BMP5_CHIP_ID_SEC);
 		return -EINVAL;
+	}
+
+	drv->chip_id = chip_id_byte;
+
+	ret = validate_chip_id(drv);
+	if (ret != BMP5_OK) {
+		LOG_ERR("Unexpected chip id (%#02x). Expected (%#02x or %#02x)", drv->chip_id,
+			BMP5_CHIP_ID_PRIM, BMP5_CHIP_ID_SEC);
+		return ret;
 	}
 
 	ret = set_iir_filters_config(&drv->osr_odr_press_config, dev);
@@ -608,10 +679,43 @@ static int bmp581_init(const struct device *dev)
 	return ret;
 }
 
+#ifdef CONFIG_PM_DEVICE
+static int bmp581_pm_action(const struct device *dev, enum pm_device_action action)
+{
+	struct bmp581_data *drv = (struct bmp581_data *)dev->data;
+	int ret;
+
+	switch (action) {
+	case PM_DEVICE_ACTION_RESUME:
+		/*
+		 * Restore the configured power mode (NORMAL/FORCED/CONTINUOUS).
+		 * set_power_mode() drops the device to STANDBY first as required
+		 * by the datasheet (section 4.3.7) before transitioning to an
+		 * active mode.
+		 */
+		ret = set_power_mode(drv->osr_odr_press_config.power_mode, dev);
+		break;
+	case PM_DEVICE_ACTION_SUSPEND:
+		/*
+		 * Per datasheet section 4.3.1, STANDBY halts measurements but
+		 * keeps registers accessible and preserves the last sample in
+		 * the data registers. Transition takes up to t_standby (2.5 ms).
+		 */
+		ret = set_power_mode(BMP5_POWERMODE_STANDBY, dev);
+		break;
+	default:
+		ret = -ENOTSUP;
+		break;
+	}
+
+	return ret;
+}
+#endif /* CONFIG_PM_DEVICE */
+
 #ifdef CONFIG_SENSOR_ASYNC_API
 
-static void bmp581_complete_result(struct rtio *ctx, const struct rtio_sqe *sqe,
-				   int result, void *arg)
+static void bmp581_complete_result(struct rtio *ctx, const struct rtio_sqe *sqe, int result,
+				   void *arg)
 {
 	ARG_UNUSED(result);
 
@@ -642,6 +746,7 @@ static void bmp581_submit_one_shot(const struct device *dev, struct rtio_iodev_s
 	uint8_t *buf;
 	uint32_t buf_len;
 	struct bmp581_encoded_data *edata;
+	struct bmp581_data *data = dev->data;
 	const struct bmp581_config *conf = dev->config;
 
 	err = rtio_sqe_rx_buf(iodev_sqe, min_buf_len, min_buf_len, &buf, &buf_len);
@@ -662,9 +767,9 @@ static void bmp581_submit_one_shot(const struct device *dev, struct rtio_iodev_s
 
 	struct rtio_sqe *read_sqe;
 
-	err = bmp581_prep_reg_read_rtio_async(&conf->bus, BMP5_REG_TEMP_DATA_XLSB,
-					      edata->payload, sizeof(edata->payload),
-					      &read_sqe);
+	data->stream.i2c_reg_temp = BMP5_REG_TEMP_DATA_XLSB;
+	err = bmp581_prep_reg_read_rtio_async(&conf->bus, &data->stream.i2c_reg_temp,
+					      edata->payload, sizeof(edata->payload), &read_sqe);
 	if (err < 0) {
 		LOG_ERR("Failed to prepare async read operation");
 		rtio_iodev_sqe_err(iodev_sqe, err);
@@ -681,10 +786,7 @@ static void bmp581_submit_one_shot(const struct device *dev, struct rtio_iodev_s
 		return;
 	}
 
-	rtio_sqe_prep_callback_no_cqe(complete_sqe,
-				      bmp581_complete_result,
-				      iodev_sqe,
-				      (void *)dev);
+	rtio_sqe_prep_callback_no_cqe(complete_sqe, bmp581_complete_result, iodev_sqe, (void *)dev);
 
 	rtio_submit(conf->bus.rtio.ctx, 0);
 }
@@ -696,6 +798,18 @@ static void bmp581_submit(const struct device *dev, struct rtio_iodev_sqe *iodev
 	if (!cfg->is_streaming) {
 		bmp581_submit_one_shot(dev, iodev_sqe);
 	} else if (IS_ENABLED(CONFIG_BMP581_STREAM)) {
+		/*
+		 * Streaming relies on DRDY/FIFO interrupts, which only fire while
+		 * the device is in NORMAL or CONTINUOUS mode. If the device has
+		 * been suspended, refuse the request so the caller doesn't wait
+		 * forever for an interrupt that won't arrive.
+		 */
+		int ret = bmp581_pm_busy_check(dev);
+
+		if (ret != 0) {
+			rtio_iodev_sqe_err(iodev_sqe, ret);
+			return;
+		}
 		bmp581_stream_submit(dev, iodev_sqe);
 	} else {
 		LOG_ERR("Streaming not supported");
@@ -715,17 +829,51 @@ static DEVICE_API(sensor, bmp581_driver_api) = {
 #endif
 };
 
+/* SPI mode 0 (CPOL=0, CPHA=0). Datasheet supports modes 0 and 3 up to 12 MHz. */
+#define BMP581_SPI_OPERATION (SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_TRANSFER_MSB)
+
+#define BMP581_BUS_IODEV_DEFINE(i)                                                                 \
+	COND_CODE_1(DT_INST_ON_BUS(i, i3c),                                                        \
+		    (I3C_DT_IODEV_DEFINE(bmp581_bus_##i, DT_DRV_INST(i))),                         \
+		    (COND_CODE_1(DT_INST_ON_BUS(i, i2c),                                           \
+				 (I2C_DT_IODEV_DEFINE(bmp581_bus_##i, DT_DRV_INST(i))),            \
+				 (SPI_DT_IODEV_DEFINE(bmp581_bus_##i, DT_DRV_INST(i),              \
+						      BMP581_SPI_OPERATION)))))
+
+#define BMP581_BUS_TYPE(i)                                                                         \
+	COND_CODE_1(DT_INST_ON_BUS(i, i3c),                                                        \
+		    (BMP581_BUS_TYPE_I3C),                                                         \
+		    (COND_CODE_1(DT_INST_ON_BUS(i, i2c),                                           \
+				 (BMP581_BUS_TYPE_I2C),                                            \
+				 (BMP581_BUS_TYPE_SPI))))
+
+#if DT_HAS_COMPAT_ON_BUS_STATUS_OKAY(bosch_bmp581, i3c)
+#define BMP581_BUS_I3C_ID(i)                                                                       \
+	COND_CODE_1(DT_INST_ON_BUS(i, i3c), (.i3c.id = I3C_DEVICE_ID_DT_INST(i),), ())
+#else
+#define BMP581_BUS_I3C_ID(i)
+#endif
+
+#if DT_HAS_COMPAT_ON_BUS_STATUS_OKAY(bosch_bmp581, i2c)
+#define BMP581_I2C_SPEC_DEFINE(i)                                                                  \
+	COND_CODE_1(DT_INST_ON_BUS(i, i2c),                                                        \
+		(static const struct i2c_dt_spec bmp581_i2c_spec_##i = I2C_DT_SPEC_INST_GET(i);), \
+		    ())
+#define BMP581_BUS_I2C_SPEC(i)                                                                     \
+	COND_CODE_1(DT_INST_ON_BUS(i, i2c),                                                        \
+		    (.i2c_spec = &bmp581_i2c_spec_##i,), (.i2c_spec = NULL,))
+#else
+#define BMP581_I2C_SPEC_DEFINE(i)
+#define BMP581_BUS_I2C_SPEC(i)   .i2c_spec = NULL,
+#endif
+
+/* clang-format off */
 #define BMP581_INIT(i)                                                                             \
                                                                                                    \
-	BUILD_ASSERT(COND_CODE_1(DT_INST_NODE_HAS_PROP(i, fifo_watermark),                         \
-				 (DT_INST_PROP(i, fifo_watermark) > 0 &&                           \
-				  DT_INST_PROP(i, fifo_watermark) < 16),                           \
-				 (true)),                                                          \
-		     "fifo-watermark must be between 1 and 15. Please set it in "                  \
-		     "the device-tree node properties");                                           \
+	BMP581_I2C_SPEC_DEFINE(i)                                                                  \
                                                                                                    \
 	RTIO_DEFINE(bmp581_rtio_ctx_##i, 16, 16);                                                  \
-	I2C_DT_IODEV_DEFINE(bmp581_bus_##i, DT_DRV_INST(i));                                       \
+	BMP581_BUS_IODEV_DEFINE(i);                                                                \
                                                                                                    \
 	static struct bmp581_data bmp581_data_##i = {                                              \
 		.osr_odr_press_config = {                                                          \
@@ -743,16 +891,27 @@ static DEVICE_API(sensor, bmp581_driver_api) = {
 	};                                                                                         \
                                                                                                    \
 	static const struct bmp581_config bmp581_config_##i = {                                    \
-		.bus.rtio = {                                                                      \
-			.ctx = &bmp581_rtio_ctx_##i,                                               \
-			.iodev = &bmp581_bus_##i,                                                  \
-			.type = BMP581_BUS_TYPE_I2C,                                               \
+		.bus = {                                                                           \
+			BMP581_BUS_I2C_SPEC(i)                                                     \
+			.rtio = {                                                                  \
+				.ctx = &bmp581_rtio_ctx_##i,                                       \
+				.iodev = &bmp581_bus_##i,                                          \
+				.type = BMP581_BUS_TYPE(i),                                        \
+				BMP581_BUS_I3C_ID(i)                                               \
+			},                                                                         \
 		},                                                                                 \
 		.int_gpio = GPIO_DT_SPEC_INST_GET_OR(i, int_gpios, {0}),                           \
+		.int_polarity = !DT_INST_PROP(i, int_active_low),                                  \
+		.int_open_drain = DT_INST_PROP(i, int_open_drain),                                 \
+		.int_latched = DT_INST_PROP(i, int_latched),                                       \
 	};                                                                                         \
                                                                                                    \
-	SENSOR_DEVICE_DT_INST_DEFINE(i, bmp581_init, NULL, &bmp581_data_##i, &bmp581_config_##i,   \
+	PM_DEVICE_DT_INST_DEFINE(i, bmp581_pm_action);                                             \
+                                                                                                   \
+	SENSOR_DEVICE_DT_INST_DEFINE(i, bmp581_init, PM_DEVICE_DT_INST_GET(i),                     \
+				     &bmp581_data_##i, &bmp581_config_##i,                         \
 				     POST_KERNEL, CONFIG_SENSOR_INIT_PRIORITY,                     \
 				     &bmp581_driver_api);
+/* clang-format on */
 
 DT_INST_FOREACH_STATUS_OKAY(BMP581_INIT)

@@ -33,6 +33,7 @@
 #define FAKEDRIVER0_NODEID    DT_PATH(fakedriver_e0000000)
 #define FAKEDRIVER0_NODELABEL "fake_driver_label"
 
+/** @cond INTERNAL_HIDDEN */
 /* A device without init call */
 DEVICE_DEFINE(dummy_noinit, DUMMY_NOINIT, NULL, NULL, NULL, NULL,
 	      POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, NULL);
@@ -52,6 +53,7 @@ static int fakedeferdriver_init(const struct device *dev);
 
 DEVICE_DT_DEFINE(DT_INST(2, fakedeferdriver), fakedeferdriver_init, NULL, NULL, NULL, POST_KERNEL,
 		 CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, NULL);
+/** @endcond */
 
 /**
  * @brief Test cases to verify device objects
@@ -79,7 +81,8 @@ DEVICE_DT_DEFINE(DT_INST(2, fakedeferdriver), fakedeferdriver_init, NULL, NULL, 
  *
  * @ingroup kernel_device_tests
  *
- * @see device_get_binding(), DEVICE_DEFINE()
+ * @see device_get_binding()
+ * @see DEVICE_DEFINE()
  */
 ZTEST(device, test_dummy_device)
 {
@@ -109,7 +112,8 @@ ZTEST(device, test_dummy_device)
  *
  * Validates device binding for an existing device object.
  *
- * @see device_get_binding(), DEVICE_DEFINE()
+ * @see device_get_binding()
+ * @see DEVICE_DEFINE()
  */
 ZTEST_USER(device, test_dynamic_name)
 {
@@ -127,7 +131,8 @@ ZTEST_USER(device, test_dynamic_name)
  * Validates binding of a random device driver(non-defined driver) named
  * "ANOTHER_BOGUS_NAME".
  *
- * @see device_get_binding(), DEVICE_DEFINE()
+ * @see device_get_binding()
+ * @see DEVICE_DEFINE()
  */
 ZTEST_USER(device, test_bogus_dynamic_name)
 {
@@ -144,7 +149,8 @@ ZTEST_USER(device, test_bogus_dynamic_name)
  *
  * Validates device binding for device object when given dynamic name is null.
  *
- * @see device_get_binding(), DEVICE_DEFINE()
+ * @see device_get_binding()
+ * @see DEVICE_DEFINE()
  */
 ZTEST_USER(device, test_null_dynamic_name)
 {
@@ -162,7 +168,6 @@ ZTEST_USER(device, test_null_dynamic_name)
 #endif
 }
 
-__pinned_bss
 static struct init_record {
 	bool pre_kernel;
 	bool is_in_isr;
@@ -170,10 +175,8 @@ static struct init_record {
 	bool could_yield;
 } init_records[4];
 
-__pinned_data
 static struct init_record *rp = init_records;
 
-__pinned_func
 static int add_init_record(bool pre_kernel)
 {
 	rp->pre_kernel = pre_kernel;
@@ -184,13 +187,11 @@ static int add_init_record(bool pre_kernel)
 	return 0;
 }
 
-__pinned_func
 static int pre1_fn(void)
 {
 	return add_init_record(true);
 }
 
-__pinned_func
 static int pre2_fn(void)
 {
 	return add_init_record(true);
@@ -298,6 +299,19 @@ SYS_INIT_NAMED(init3, init_fn, APPLICATION, 2);
 SYS_INIT_NAMED(init4, init_fn, APPLICATION, 99);
 SYS_INIT_NAMED(init5, init_fn, APPLICATION, 999);
 
+/**
+ * @brief Test registering multiple initialization functions
+ *
+ * @ingroup kernel_device_tests
+ *
+ * @details Register the same initialization function multiple times with
+ * SYS_INIT() and SYS_INIT_NAMED() at the same initialization level but
+ * different priorities, and verify that every registered entry is invoked
+ * during system initialization.
+ *
+ * @see SYS_INIT()
+ * @see SYS_INIT_NAMED()
+ */
 ZTEST(device, test_sys_init_multiple)
 {
 	zassert_equal(sys_init_counter, 6, "");

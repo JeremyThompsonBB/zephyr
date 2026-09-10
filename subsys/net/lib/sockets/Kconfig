@@ -67,7 +67,7 @@ config HEAP_MEM_POOL_ADD_SIZE_GETADDRINFO
 	# a default configuration on 64-bit platform
 	int
 	default 280
-	depends on DNS_RESOLVER
+	depends on DNS_RESOLVER || NET_IP
 
 config NET_SOCKET_MAX_SEND_WAIT
 	int "Max time in milliseconds waiting for a send command"
@@ -95,6 +95,14 @@ config ZVFS_OPEN_ADD_SIZE_SOCKETS_SERVICE
 	help
 	  The socket service opens a permanent zvfs_eventfd, which consumes a file
 	  descriptor.
+
+config ZVFS_EVENTFD_ADD_SIZE_SOCKETS_SERVICE
+	int "Number of eventfds needed by the socket service"
+	default 1
+	depends on NET_SOCKETS_SERVICE
+	help
+	  The socket service dispatcher allocates one permanent zvfs_eventfd to
+	  trigger events during polling.
 
 config NET_SOCKETS_SERVICE_THREAD_PRIO
 	int "Priority of the socket service dispatcher thread"
@@ -370,6 +378,38 @@ config NET_SOCKETS_PACKET_DGRAM
 	  on the information in the net_sockaddr_ll destination address before
 	  they are queued.
 
+config NET_SOCKETS_PACKET_MCAST_MEMBERSHIP
+	bool "Packet socket multicast membership support"
+	depends on NET_SOCKETS_PACKET && NET_NATIVE && NET_L2_ETHERNET
+	help
+	  Add support for ZSOCK_PACKET_ADD_MEMBERSHIP and ZSOCK_PACKET_DROP_MEMBERSHIP
+	  socket options for AF_PACKET sockets. The options operate at layer 2 and tell
+	  the NIC's receive filter which link-layer multicast addresses to let through.
+	  Ethernet is currently the only link layer that can do this, so the
+	  dependency to it can be relaxed when another one gains the support.
+
+config NET_SOCKETS_PACKET_MCAST_MEMBERSHIP_COUNT
+	int "Number of packet socket multicast group memberships"
+	depends on NET_SOCKETS_PACKET_MCAST_MEMBERSHIP
+	default 2
+	range 1 255
+	help
+	  Maximum number of L2 multicast group memberships that can be active
+	  at the same time. Every successful ZSOCK_PACKET_ADD_MEMBERSHIP for a
+	  group that a socket has not joined yet takes one entry, and the entry
+	  is released by ZSOCK_PACKET_DROP_MEMBERSHIP or when the socket is
+	  closed. The same group joined by two different sockets takes two
+	  entries.
+
+config NET_L2_ETHERNET_MCAST_FILTER_ADD_COUNT_PACKET_SOCKET
+	int
+	depends on NET_SOCKETS_PACKET_MCAST_MEMBERSHIP && NET_L2_ETHERNET
+	default NET_SOCKETS_PACKET_MCAST_MEMBERSHIP_COUNT
+	help
+	  Every packet socket multicast membership needs a link layer
+	  multicast address on an Ethernet interface. Two sockets joining the
+	  same group share one address, so this is an upper bound.
+
 config NET_SOCKETS_INET_RAW
 	bool "AF_INET/AF_INET6 and SOCK_RAW sockets support"
 	depends on NET_NATIVE_IP
@@ -378,10 +418,9 @@ config NET_SOCKETS_INET_RAW
 	  to receive raw IP datagrams before further processing takes place.
 
 config NET_SOCKETS_CAN
-	bool "Socket CAN support [EXPERIMENTAL]"
+	bool "Socket CAN support"
 	select NET_L2_CANBUS_RAW
 	select NET_CONNECTION_SOCKETS
-	select EXPERIMENTAL
 	help
 	  The value depends on your network needs.
 
@@ -467,10 +506,9 @@ module-help = Enables logging for sockets code.
 source "subsys/net/Kconfig.template.log_config.net"
 
 config NET_SOCKETS_OBJ_CORE
-	bool "Object core socket support [EXPERIMENTAL]"
+	bool "Object core socket support"
 	depends on OBJ_CORE
 	select OBJ_CORE_STATS
-	select EXPERIMENTAL
 	help
 	  Select this if you want to use object core with socket API to get
 	  network socket information and statistics via object core.

@@ -553,13 +553,6 @@ def find_kobjects(elf, syms):
     app_smem_start = syms["_app_smem_start"]
     app_smem_end = syms["_app_smem_end"]
 
-    if "CONFIG_LINKER_USE_PINNED_SECTION" in syms and "_app_smem_pinned_start" in syms:
-        app_smem_pinned_start = syms["_app_smem_pinned_start"]
-        app_smem_pinned_end = syms["_app_smem_pinned_end"]
-    else:
-        app_smem_pinned_start = app_smem_start
-        app_smem_pinned_end = app_smem_end
-
     user_stack_start = syms["z_user_stacks_start"]
     user_stack_end = syms["z_user_stacks_end"]
 
@@ -676,10 +669,7 @@ def find_kobjects(elf, syms):
             continue
 
         _, user_ram_allowed, _ = kobjects[ko.type_obj.name]
-        if not user_ram_allowed and (
-            (app_smem_start <= addr < app_smem_end)
-            or (app_smem_pinned_start <= addr < app_smem_pinned_end)
-        ):
+        if not user_ram_allowed and app_smem_start <= addr < app_smem_end:
             debug(f"object '{ko.type_obj.name}' found in invalid location {hex(addr)}")
             continue
 
@@ -953,6 +943,18 @@ def write_kobj_types_output(fp):
     for subsystem in subsystems:
         subsystem = subsystem.replace("_driver_api", "").upper()
         fp.write(f"K_OBJ_DRIVER_{subsystem},\n")
+
+    if subsystems:
+        first = subsystems[0].replace("_driver_api", "").upper()
+        last = subsystems[-1].replace("_driver_api", "").upper()
+        fp.write(f"K_OBJ_DRIVER_FIRST = K_OBJ_DRIVER_{first},\n")
+        fp.write(f"K_OBJ_DRIVER_LAST = K_OBJ_DRIVER_{last},\n")
+    else:
+        # There will always be core kernel objects. In the unlikely event
+        # there are no driver subsystems, order the first and last driver
+        # entries to values that will indicate an empty set (first > last).
+        fp.write("K_OBJ_DRIVER_LAST,\n")
+        fp.write("K_OBJ_DRIVER_FIRST,\n")
 
 
 def write_kobj_otype_output(fp):

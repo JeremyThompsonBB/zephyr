@@ -14,7 +14,7 @@ endif()
 # Continue to prepare the build environment
 zephyr_include_directories(include)
 
-if(NOT CONFIG_MCUBOOT AND NOT CONFIG_SOC_ESP32_APPCPU AND NOT CONFIG_SOC_ESP32S3_APPCPU)
+if(NOT CONFIG_MCUBOOT AND NOT CONFIG_SOC_ESP32_APPCPU_TARGET)
   zephyr_sources_ifdef(CONFIG_ESP_SPIRAM esp_psram.c)
 endif()
 
@@ -57,8 +57,10 @@ else()
   file(WRITE "${_extram_inc}" "")
 endif()
 
-# Get flash size to use in esptool as string
-math(EXPR esptoolpy_flashsize "${CONFIG_FLASH_SIZE} / 0x100000")
+# Get flash size in MB for esptool from the chosen zephyr,flash node
+dt_chosen(dts_flash PROPERTY "zephyr,flash")
+dt_reg_size(flash_size_bytes PATH ${dts_flash})
+math(EXPR esptoolpy_flashsize "${flash_size_bytes} / 0x100000")
 
 # Get UART baudrate from DT
 dt_chosen(dts_shell_uart PROPERTY "zephyr,shell-uart")
@@ -68,7 +70,7 @@ endif()
 
 message("-- Espressif HAL path: ${ESP_IDF_PATH}")
 
-if((CONFIG_ESP_SIMPLE_BOOT OR CONFIG_MCUBOOT) AND NOT (CONFIG_SOC_ESP32C5_LPCORE OR CONFIG_SOC_ESP32C6_LPCORE))
+if((CONFIG_ESP_SIMPLE_BOOT OR CONFIG_MCUBOOT) AND NOT (CONFIG_SOC_ESP32C5_LPCORE OR CONFIG_SOC_ESP32C6_LPCORE OR CONFIG_SOC_ESP32P4_LPCORE))
   if(CONFIG_BUILD_OUTPUT_BIN)
     set(ELF2IMAGE_ARG "")
     if(NOT CONFIG_MCUBOOT)
@@ -86,9 +88,7 @@ if((CONFIG_ESP_SIMPLE_BOOT OR CONFIG_MCUBOOT) AND NOT (CONFIG_SOC_ESP32C5_LPCORE
   endif()
 endif()
 
-set_property(TARGET bintools PROPERTY disassembly_flag_inline_source)
-
-if(CONFIG_ESP_SIMPLE_BOOT AND NOT (CONFIG_SOC_ESP32C5_LPCORE OR CONFIG_SOC_ESP32C6_LPCORE))
+if(CONFIG_ESP_SIMPLE_BOOT AND NOT (CONFIG_SOC_ESP32C5_LPCORE OR CONFIG_SOC_ESP32C6_LPCORE OR CONFIG_SOC_ESP32P4_LPCORE))
   dt_nodelabel(image_part_path NODELABEL "boot_partition")
 else()
   dt_chosen(image_part_path PROPERTY "zephyr,code-partition")
@@ -117,20 +117,23 @@ if(CONFIG_MCUBOOT)
       ARGS
         --rtl-dirs ${CMAKE_BINARY_DIR}/zephyr
         --elf-file ${CMAKE_BINARY_DIR}/zephyr/${KERNEL_ELF_NAME}
-        find-refs
-        --from-section='.iram0.loader_text'
-        --to-section='.iram0.text'
-        --exit-code)
+        find-reachable-from-loader-func
+        --map ${CMAKE_BINARY_DIR}/zephyr/${KERNEL_MAP_NAME}
+        --roots='do_boot,start_cpu0_image'
+        --outplacers
+        --summary)
 endif()
 
 if(CONFIG_MCUBOOT)
   set(SOC_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../${CONFIG_SOC}/mcuboot.ld CACHE INTERNAL "")
-elseif(CONFIG_SOC_ESP32_APPCPU OR CONFIG_SOC_ESP32S3_APPCPU)
+elseif(CONFIG_SOC_ESP32_APPCPU_TARGET)
   set(SOC_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../${CONFIG_SOC}/default_appcpu.ld CACHE INTERNAL "")
-elseif(CONFIG_SOC_ESP32C5_LPCORE OR CONFIG_SOC_ESP32C6_LPCORE)
+elseif(CONFIG_SOC_ESP32C5_LPCORE OR CONFIG_SOC_ESP32C6_LPCORE OR CONFIG_SOC_ESP32P4_LPCORE)
   set(SOC_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../${CONFIG_SOC}/default_lpcore.ld CACHE INTERNAL "")
 else()
   set(SOC_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../${CONFIG_SOC}/default.ld CACHE INTERNAL "")
 endif()
 
 zephyr_sources_ifdef(CONFIG_ESP32_LCD_CAM esp_lcd_cam.c)
+zephyr_sources_ifdef(CONFIG_ESP32_ETM esp_etm_alloc.c)
+zephyr_sources(instr_mem.c)

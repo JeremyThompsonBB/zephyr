@@ -17,6 +17,7 @@
 #include <zephyr/bluetooth/addr.h>
 #include <zephyr/bluetooth/assigned_numbers.h>
 #include <zephyr/bluetooth/att.h>
+#include <zephyr/bluetooth/audio/ascs.h>
 #include <zephyr/bluetooth/audio/bap.h>
 #include <zephyr/bluetooth/audio/cap.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -102,7 +103,7 @@ static void print_codec_cfg(const struct bt_audio_codec_cfg *codec_cfg)
 			LOG_DBG("  Channel allocation: 0x%x", chan_allocation);
 		}
 
-		LOG_DBG("  Octets per frame: %d (negative means value not pressent)",
+		LOG_DBG("  Octets per frame: %d (negative means value not present)",
 			bt_audio_codec_cfg_get_octets_per_frame(codec_cfg));
 		LOG_DBG("  Frames per SDU: %d",
 			bt_audio_codec_cfg_get_frame_blocks_per_sdu(codec_cfg, true));
@@ -562,8 +563,8 @@ static void stream_state_changed(struct bt_bap_stream *stream)
 	btp_send_ascs_ase_state_changed_ev(stream->conn, u_stream->ase_id, info.state);
 }
 
-static void stream_configured_cb(struct bt_bap_stream *stream,
-				 const struct bt_bap_qos_cfg_pref *pref)
+static void stream_codec_configured_cb(struct bt_bap_stream *stream,
+				       const struct bt_bap_qos_cfg_pref *pref)
 {
 	struct bt_bap_ep_info info;
 	struct btp_bap_unicast_connection *u_conn;
@@ -581,7 +582,7 @@ static void stream_configured_cb(struct bt_bap_stream *stream,
 	stream_state_changed(stream);
 }
 
-static void stream_qos_set_cb(struct bt_bap_stream *stream)
+static void stream_qos_configured_cb(struct bt_bap_stream *stream)
 {
 	LOG_DBG("QoS set stream %p", stream);
 
@@ -849,8 +850,8 @@ static void stream_recv_cb(struct bt_bap_stream *stream, const struct bt_iso_rec
 }
 
 static struct bt_bap_stream_ops stream_ops = {
-	.configured = stream_configured_cb,
-	.qos_set = stream_qos_set_cb,
+	.codec_configured = stream_codec_configured_cb,
+	.qos_configured = stream_qos_configured_cb,
 	.enabled = stream_enabled_cb,
 	.metadata_updated = stream_metadata_updated_cb,
 	.disabled = stream_disabled_cb,
@@ -1079,7 +1080,8 @@ static void unicast_client_endpoint_cb(struct bt_conn *conn, enum bt_audio_dir d
 			return;
 		}
 
-		u_conn->end_points[u_conn->end_points_count++] = ep;
+		u_conn->end_points[u_conn->end_points_count] = ep;
+		u_conn->end_points_count++;
 		btp_send_ase_found_ev(conn, ep);
 
 		return;

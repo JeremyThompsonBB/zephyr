@@ -577,6 +577,10 @@ enum ieee802154_rx_fail_reason {
 	IEEE802154_RX_FAIL_INVALID_FCS,
 	/** Address did not match */
 	IEEE802154_RX_FAIL_ADDR_FILTERED,
+	/** No buffer available */
+	IEEE802154_RX_FAIL_NO_BUFS,
+	/** Aborted */
+	IEEE802154_RX_FAIL_ABORT,
 	/** General reason */
 	IEEE802154_RX_FAIL_OTHER
 };
@@ -1573,8 +1577,6 @@ struct ieee802154_radio_api {
 	 * @param channel the number of the channel to be set in CPU byte order
 	 *
 	 * @retval 0 channel was successfully set
-	 * @retval -EALREADY The previous channel is the same as the requested
-	 * channel.
 	 * @retval -EINVAL The given channel is not within the range of valid
 	 * channels of the driver's current channel page, see the
 	 * IEEE802154_ATTR_PHY_SUPPORTED_CHANNEL_RANGES driver attribute.

@@ -189,7 +189,7 @@ static void http_client_dns_cb(enum dns_resolve_status status, struct dns_addrin
 		return;
 	}
 
-	ctx->sa = *(net_sas(&info->ai_addr));
+	ctx->sa = info->ai_addr_storage;
 	ctx->sa.ss_family = info->ai_family;
 	ctx->err = 0;
 }
@@ -383,10 +383,13 @@ static int http_client_handler(struct http_response *rsp, enum http_final_call f
 		return -ENODATA;
 	}
 
+	/* For use of .* we need to cast it to an int, on 64 bit platforms a size_t is bigger than
+	 * an int.
+	 */
 	if (ctx->verbose) {
-		shell_print(sh, "%.*s", rsp->recv_buf_len, rsp->recv_buf);
+		shell_print(sh, "%.*s", (int)rsp->recv_buf_len, rsp->recv_buf);
 	} else {
-		shell_print(sh, "%.*s", rsp->body_frag_len, rsp->body_frag_start);
+		shell_print(sh, "%.*s", (int)rsp->body_frag_len, rsp->body_frag_start);
 	}
 
 	return 0;

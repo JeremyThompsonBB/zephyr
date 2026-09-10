@@ -218,8 +218,8 @@ static void pmw3610_motion_work_handler(struct k_work *work)
 	x = sign_extend(x, PMW3610_DATA_SIZE_BITS - 1);
 	y = sign_extend(y, PMW3610_DATA_SIZE_BITS - 1);
 
-	input_report_rel(data->dev, cfg->axis_x, x, false, K_FOREVER);
-	input_report_rel(data->dev, cfg->axis_y, y, true, K_FOREVER);
+	input_report_rel(dev, cfg->axis_x, x, false, K_FOREVER);
+	input_report_rel(dev, cfg->axis_y, y, true, K_FOREVER);
 
 	if (cfg->smart_mode) {
 		uint16_t shutter_val = sys_get_be16(&burst_data[BURST_SHUTTER_HI]);
@@ -565,9 +565,6 @@ static int pmw3610_pm_action(const struct device *dev,
 			  SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_TRANSFER_MSB)
 
 #define PMW3610_INIT(n)								\
-	BUILD_ASSERT(IN_RANGE(DT_INST_PROP_OR(n, res_cpi, RES_MIN),		\
-			      RES_MIN, RES_MAX), "invalid res-cpi");		\
-										\
 	static const struct pmw3610_config pmw3610_cfg_##n = {			\
 		.spi = SPI_DT_SPEC_INST_GET(n, PMW3610_SPI_MODE),		\
 		.motion_gpio = GPIO_DT_SPEC_INST_GET(n, motion_gpios),		\

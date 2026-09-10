@@ -9,13 +9,11 @@
 #include <string.h>
 #include <zephyr/sys/math_extras.h>
 #include <zephyr/sys/rb.h>
-#include <zephyr/kernel_structs.h>
 #include <zephyr/sys/sys_io.h>
 #include <ksched.h>
 #include <zephyr/syscall.h>
 #include <zephyr/internal/syscall_handler.h>
 #include <zephyr/device.h>
-#include <zephyr/init.h>
 #include <stdbool.h>
 #include <zephyr/app_memory/app_memdomain.h>
 #include <zephyr/sys/libc-hooks.h>
@@ -24,6 +22,7 @@
 #include <inttypes.h>
 #include <zephyr/linker/linker-defs.h>
 #include <zephyr/cache.h>
+#include <kernel_internal.h>
 
 #ifdef Z_LIBC_PARTITION_EXISTS
 K_APPMEM_PARTITION_DEFINE(z_libc_partition);
@@ -94,6 +93,9 @@ const char *otype_to_str(enum k_objects otype)
 	 */
 	case K_OBJ_ANY:
 		ret = "generic";
+		break;
+	case K_OBJ_DRIVER_ANY:
+		ret = "generic driver";
 		break;
 #include <zephyr/otype-to-str.h>
 	default:
@@ -273,12 +275,17 @@ static bool thread_idx_alloc(uintptr_t *tidx)
 	int i;
 	int idx;
 	int base;
+	bool ret = false;
+	k_spinlock_key_t key;
 
 	base = 0;
+	key = k_spin_lock(&lists_lock);
 	for (i = 0; i < CONFIG_MAX_THREAD_BYTES; i++) {
 		idx = find_lsb_set(_thread_idx_map[i]);
 
 		if (idx != 0) {
+			struct dyn_obj *obj, *next;
+
 			*tidx = base + (idx - 1);
 
 			/* Clear the bit. We already know the array index,
@@ -287,16 +294,22 @@ static bool thread_idx_alloc(uintptr_t *tidx)
 			_thread_idx_map[i] &= ~(BIT(idx - 1));
 
 			/* Clear permission from all objects */
-			k_object_wordlist_foreach(clear_perms_cb,
-						   (void *)*tidx);
 
-			return true;
+			z_object_gperf_wordlist_foreach(clear_perms_cb, (void *)*tidx);
+
+			SYS_DLIST_FOR_EACH_CONTAINER_SAFE(&obj_list, obj, next, dobj_list) {
+				clear_perms_cb(&obj->kobj, (void *)*tidx);
+			}
+
+			ret = true;
+			break;
 		}
 
 		base += 8;
 	}
 
-	return false;
+	k_spin_unlock(&lists_lock, key);
+	return ret;
 }
 
 /**
@@ -352,6 +365,14 @@ static struct k_object *dynamic_object_create(enum k_objects otype, size_t align
 		}
 
 		adjusted_size = STACK_ELEMENT_DATA_SIZE(size);
+		if (adjusted_size < size) {
+			/* The size adjustment above overflowed, which would
+			 * hand out an allocation smaller than requested.
+			 */
+			k_free(dyn);
+			return NULL;
+		}
+
 		dyn->data = z_thread_aligned_alloc(DYN_OBJ_DATA_ALIGN_K_THREAD_STACK,
 						     adjusted_size);
 		if (dyn->data == NULL) {
@@ -389,7 +410,14 @@ static struct k_object *dynamic_object_create(enum k_objects otype, size_t align
 		dyn->kobj.data.stack_size = adjusted_size;
 #endif /* CONFIG_GEN_PRIV_STACKS */
 	} else {
-		dyn->data = z_thread_aligned_alloc(align, obj_size_get(otype) + size);
+		size_t total_size = obj_size_get(otype) + size;
+
+		if (total_size < size) {
+			k_free(dyn);
+			return NULL;
+		}
+
+		dyn->data = z_thread_aligned_alloc(align, total_size);
 		if (dyn->data == NULL) {
 			k_free(dyn);
 			return NULL;
@@ -664,6 +692,16 @@ static void unref_check(struct k_object *ko, uintptr_t index)
 	case K_OBJ_STACK:
 		k_stack_cleanup((struct k_stack *)ko->name);
 		break;
+	case K_OBJ_TIMER:
+		/* k_timer_cleanup() does not check whether the timer has
+		 * been initialized; calling it on an uninitialized timer
+		 * would read garbage from an uninitialized dnode. Guard
+		 * explicitly here.
+		 */
+		if ((ko->flags & K_OBJ_FLAG_INITIALIZED) != 0U) {
+			k_timer_cleanup((struct k_timer *)ko->name);
+		}
+		break;
 	default:
 		/* Nothing to do */
 		break;
@@ -843,9 +881,16 @@ void k_object_access_all_grant(const void *object)
 int k_object_validate(struct k_object *ko, enum k_objects otype,
 		       enum _obj_init_check init)
 {
-	if (unlikely((ko == NULL) ||
-		((otype != K_OBJ_ANY) && (ko->type != otype)))) {
+	if (unlikely(ko == NULL)) {
 		return -EBADF;
+	}
+
+	if (unlikely((otype != K_OBJ_ANY) && (otype != ko->type))) {
+		if ((otype != K_OBJ_DRIVER_ANY) ||
+		    (ko->type < K_OBJ_DRIVER_FIRST) ||
+		    (ko->type > K_OBJ_DRIVER_LAST)) {
+			return -EBADF;
+		}
 	}
 
 	/* Manipulation of any kernel objects by a user thread requires that
@@ -1046,7 +1091,7 @@ out:
 extern char __app_shmem_regions_start[];
 extern char __app_shmem_regions_end[];
 
-static int app_shmem_bss_zero(void)
+static void app_shmem_bss_zero(void)
 {
 	struct z_app_region *region, *end;
 
@@ -1055,44 +1100,11 @@ static int app_shmem_bss_zero(void)
 	region = (struct z_app_region *)&__app_shmem_regions_start[0];
 
 	for ( ; region < end; region++) {
-#if defined(CONFIG_DEMAND_PAGING) && !defined(CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT)
-		/* When BSS sections are not present at boot, we need to wait for
-		 * paging mechanism to be initialized before we can zero out BSS.
-		 */
-		extern bool z_sys_post_kernel;
-		bool do_clear = z_sys_post_kernel;
-
-		/* During pre-kernel init, z_sys_post_kernel == false, but
-		 * with pinned rodata region, so clear. Otherwise skip.
-		 * In post-kernel init, z_sys_post_kernel == true,
-		 * skip those in pinned rodata region as they have already
-		 * been cleared and possibly already in use. Otherwise clear.
-		 */
-		if (((uint8_t *)region->bss_start >= (uint8_t *)_app_smem_pinned_start) &&
-		    ((uint8_t *)region->bss_start < (uint8_t *)_app_smem_pinned_end)) {
-			do_clear = !do_clear;
-		}
-
-		if (do_clear)
-#endif /* CONFIG_DEMAND_PAGING && !CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT */
-		{
-			(void)memset(region->bss_start, 0, region->bss_size);
-		}
+		(void)memset(region->bss_start, 0, region->bss_size);
 	}
-
-	return 0;
 }
 
-SYS_INIT_NAMED(app_shmem_bss_zero_pre, app_shmem_bss_zero,
-	       PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
-
-#if defined(CONFIG_DEMAND_PAGING) && !defined(CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT)
-/* When BSS sections are not present at boot, we need to wait for
- * paging mechanism to be initialized before we can zero out BSS.
- */
-SYS_INIT_NAMED(app_shmem_bss_zero_post, app_shmem_bss_zero,
-	       POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
-#endif /* CONFIG_DEMAND_PAGING && !CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT */
+K_KERNEL_INIT_PRE(app_shmem_bss_zero);
 
 /*
  * Default handlers if otherwise unimplemented

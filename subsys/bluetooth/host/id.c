@@ -247,11 +247,7 @@ static void adv_rpa_expired(struct bt_le_ext_adv *adv, void *data)
 
 static void adv_rpa_invalidate(struct bt_le_ext_adv *adv, void *data)
 {
-	/* RPA of Advertisers limited by timeout or number of packets only expire
-	 * when they are stopped.
-	 */
-	if (!atomic_test_bit(adv->flags, BT_ADV_LIMITED) &&
-	    !atomic_test_bit(adv->flags, BT_ADV_USE_IDENTITY)) {
+	if (atomic_test_bit(adv->flags, BT_ADV_RPA_UPDATE)) {
 		adv_rpa_expired(adv, data);
 	}
 }
@@ -339,7 +335,7 @@ static void le_rpa_timeout_submit(void)
 	le_rpa_timeout_update();
 #endif
 
-	(void)k_work_schedule(&bt_dev.rpa_update, K_SECONDS(bt_dev.rpa_timeout));
+	(void)bt_work_schedule(&bt_dev.rpa_update, K_SECONDS(bt_dev.rpa_timeout));
 }
 
 /* this function sets new RPA only if current one is no longer valid */
@@ -683,6 +679,12 @@ static void le_force_rpa_timeout(void)
 }
 
 #if defined(CONFIG_BT_PRIVACY)
+/* Generate a random IRK for the given identity using bt_rand(). */
+static int bt_gen_irk(uint8_t id)
+{
+	return bt_rand(&bt_dev.irk[id], sizeof(bt_dev.irk[id]));
+}
+
 static void rpa_timeout(struct k_work *work)
 {
 	bool adv_enabled;
@@ -703,15 +705,12 @@ static void rpa_timeout(struct k_work *work)
 	adv_enabled = le_adv_rpa_timeout();
 	le_rpa_invalidate();
 
-	/* IF no roles using the RPA is running we can stop the RPA timer */
-	if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
-		if (!(adv_enabled || atomic_test_bit(bt_dev.flags, BT_DEV_INITIATING) ||
-		      bt_le_scan_active_scanner_running())) {
-			return;
-		}
+	/* Update the RPA if we have any active procedures that use it */
+	if ((IS_ENABLED(CONFIG_BT_BROADCASTER) && adv_enabled) ||
+	    (IS_ENABLED(CONFIG_BT_CENTRAL) && atomic_test_bit(bt_dev.flags, BT_DEV_INITIATING)) ||
+	    (IS_ENABLED(CONFIG_BT_OBSERVER) && bt_le_scan_active_scanner_running())) {
+		le_update_private_addr();
 	}
-
-	le_update_private_addr();
 }
 #endif /* CONFIG_BT_PRIVACY */
 
@@ -1328,7 +1327,7 @@ static int id_create(uint8_t id, bt_addr_le_t *addr, uint8_t *irk)
 		} else {
 			int err;
 
-			err = bt_rand(&bt_dev.irk[id], 16);
+			err = bt_gen_irk(id);
 			if (err) {
 				return err;
 			}

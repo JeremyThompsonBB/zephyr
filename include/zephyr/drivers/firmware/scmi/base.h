@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef DRIVERS_ARM_SCMI_BASE_H_
-#define DRIVERS_ARM_SCMI_BASE_H_
+#ifndef ZEPHYR_INCLUDE_DRIVERS_FIRMWARE_SCMI_BASE_H_
+#define ZEPHYR_INCLUDE_DRIVERS_FIRMWARE_SCMI_BASE_H_
 
 /**
  * @file
@@ -31,11 +31,7 @@
 /**
  * @brief SCMI base protocol revision information
  */
-struct scmi_revision_info {
-	/** Major ABI version. */
-	uint16_t major_ver;
-	/** Minor ABI version. */
-	uint16_t minor_ver;
+struct scmi_platform_info {
 	/** Number of protocols that are implemented, excluding the base protocol. */
 	uint8_t num_protocols;
 	/** Number of agents in the system. */
@@ -52,9 +48,6 @@ struct scmi_revision_info {
  * @struct scmi_agent_info
  *
  * @brief SCMI base protocol agent info
- *
- * @param agent_id SCMI agent id.
- * @param name SCMI agent name.
  */
 struct scmi_agent_info {
 	/** Identifier for the agent */
@@ -64,12 +57,20 @@ struct scmi_agent_info {
 };
 
 /**
- * @brief SCMI base protocol get revision information.
+ * @brief SCMI base protocol get agents number.
  *
- * @param rev pointer on revision information struct scmi_revision_info.
- * @retval 0 If successful, negative errno on an error.
+ * @param num_agents pointer to store agents number.
+ * @return 0 on success, negative errno on an error.
  */
-int scmi_base_get_revision_info(struct scmi_revision_info *rev);
+int scmi_base_get_num_agents(uint8_t *num_agents);
+
+/**
+ * @brief SCMI base protocol get platform information.
+ *
+ * @param rev pointer on platform information struct scmi_platform_info.
+ * @return 0 on success, negative errno on an error.
+ */
+int scmi_base_get_platform_info(struct scmi_platform_info *rev);
 
 /**
  * @brief SCMI base protocol discover the name of an agent and agent id.
@@ -77,7 +78,7 @@ int scmi_base_get_revision_info(struct scmi_revision_info *rev);
  * @param agent_id SCMI agent id. The platform will return caller SCMI agent id
  *                 if set to SCMI_BASE_AGENT_ID_OWN.
  * @param agent_inf pointer on SCMI agent information struct scmi_agent_info.
- * @retval 0 If successful, negative errno on an error.
+ * @return 0 on success, negative errno value on failure.
  */
 int scmi_base_discover_agent(uint32_t agent_id, struct scmi_agent_info *agent_inf);
 
@@ -87,7 +88,7 @@ int scmi_base_discover_agent(uint32_t agent_id, struct scmi_agent_info *agent_in
  * @param agent_id SCMI agent id.
  * @param device_id SCMI device id.
  * @param allow If set to true, allow agent access to the device.
- * @retval 0 If successful, negative errno on an error.
+ * @return 0 on success, negative errno value on failure.
  */
 int scmi_base_device_permission(uint32_t agent_id, uint32_t device_id, bool allow);
 
@@ -96,7 +97,7 @@ int scmi_base_device_permission(uint32_t agent_id, uint32_t device_id, bool allo
  *
  * @param agent_id SCMI agent id.
  * @param reset_perm If set to true, reset all access permission settings of the agent.
- * @retval 0 If successful, negative errno on an error.
+ * @return 0 on success, negative errno value on failure.
  */
 int scmi_base_reset_agent_cfg(uint32_t agent_id, bool reset_perm);
 
@@ -104,4 +105,4 @@ int scmi_base_reset_agent_cfg(uint32_t agent_id, bool reset_perm);
  * @}
  */
 
-#endif /* DRIVERS_ARM_SCMI_BASE_H_ */
+#endif /* ZEPHYR_INCLUDE_DRIVERS_FIRMWARE_SCMI_BASE_H_ */

@@ -9,8 +9,8 @@
   * @brief Header file for extended sensor API of PAC194x/PAC195x sensor
   */
 
-#ifndef ZEPHYR_INCLUDE_DRIVERS_SENSORS_PAC194X_H
-#define ZEPHYR_INCLUDE_DRIVERS_SENSORS_PAC194X_H
+#ifndef ZEPHYR_INCLUDE_DRIVERS_SENSOR_PAC194X_H_
+#define ZEPHYR_INCLUDE_DRIVERS_SENSOR_PAC194X_H_
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,7 +53,7 @@ enum pac194x_sensor_attr_refresh_mode {
 
 /** Refresh commands for PAC194x/PAC195x */
 enum pac194x_sensor_attr_force_refresh_cmd {
-	/** Refresh only a singe PAC device. */
+	/** Refresh only a single PAC device. */
 	PAC194X_SENSOR_ATTR_FORCE_REFRESH_CMD_SINGLE = 0,
 	/** Refresh all PACs on the I2C bus at once. */
 	PAC194X_SENSOR_ATTR_FORCE_REFRESH_CMD_ALL,
@@ -101,4 +101,4 @@ enum pac194x_sensor_channel {
 }
 #endif
 
-#endif /* ZEPHYR_INCLUDE_DRIVERS_SENSORS_PAC194X_H */
+#endif /* ZEPHYR_INCLUDE_DRIVERS_SENSOR_PAC194X_H_ */

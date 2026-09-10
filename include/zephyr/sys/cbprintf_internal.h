@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @file
+ * @brief Internal helpers backing the cbprintf() implementation.
+ */
+
 #ifndef ZEPHYR_INCLUDE_SYS_CBPRINTF_INTERNAL_H_
 #define ZEPHYR_INCLUDE_SYS_CBPRINTF_INTERNAL_H_
 
@@ -15,6 +20,8 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/__assert.h>
 #include <zephyr/arch/cpu.h>
+
+/** @cond INTERNAL_HIDDEN */
 
 /*
  * Special alignment cases
@@ -53,6 +60,8 @@
 #ifndef VA_STACK_ALIGN
 #define VA_STACK_ALIGN(type)	MAX(VA_STACK_MIN_ALIGN, __alignof__(type))
 #endif
+
+/** @endcond */
 
 static inline void z_cbprintf_wcpy(int *dst, int *src, size_t len)
 {
@@ -93,6 +102,8 @@ extern "C" {
 /** @brief Return 1 if argument is a pointer to char or wchar_t
  *
  * @param x argument.
+ *
+ * @param flags Package flags.
  *
  * @return 1 if char * or wchar_t *, 0 otherwise.
  */
@@ -526,6 +537,8 @@ extern "C" {
 
 /** @brief Calculate number of char * or wchar_t * arguments in the arguments.
  *
+ * @param flags Flags. See @p CBPRINTF_PACKAGE_FLAGS.
+ *
  * @param fmt string.
  *
  * @param ... string arguments.
@@ -684,6 +697,8 @@ extern "C" {
  * Argument is put into the buffer if capable buffer is provided. Length is
  * incremented even if data is not packaged.
  *
+ * @param arg_idx Argument index.
+ *
  * @param _buf buffer.
  *
  * @param _idx index. Index is postincremented.
@@ -737,6 +752,8 @@ do { \
 /** @brief Package single argument.
  *
  * Macro is called in a loop for each argument in the string.
+ *
+ * @param arg_idx Argument index.
  *
  * @param arg argument.
  */

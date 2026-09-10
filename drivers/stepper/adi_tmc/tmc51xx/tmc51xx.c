@@ -18,6 +18,7 @@
 #include <adi_tmc5xxx_common.h>
 
 #include "tmc51xx.h"
+#include "tmc51xx_reg.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(tmc51xx, CONFIG_STEPPER_LOG_LEVEL);
@@ -525,9 +526,6 @@ static int tmc51xx_init(const struct device *dev)
 		     "clock frequency must be non-zero positive value");                           \
 	static struct tmc51xx_data tmc51xx_data_##inst = {                                         \
 		.dev = DEVICE_DT_GET(DT_DRV_INST(inst))};                                          \
-	COND_CODE_1(DT_PROP_EXISTS(inst, stallguard_threshold_velocity),			   \
-	BUILD_ASSERT(DT_PROP(inst, stallguard_threshold_velocity),				   \
-		     "stallguard threshold velocity must be a positive value"), ());               \
 	static const struct tmc51xx_config tmc51xx_config_##inst = {COND_CODE_1			   \
 		(DT_INST_ON_BUS(inst, spi),							   \
 		(TMC51XX_CONFIG_SPI(inst)),							   \

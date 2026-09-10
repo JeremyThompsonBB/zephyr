@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <autoconf.h>
+#include <zephyr/autoconf.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -97,7 +97,7 @@ static void tx_thread_func(void *arg1, void *arg2, void *arg3)
 
 		if (err != 0) {
 			/* In case of any errors, retry with a delay */
-			k_sleep(K_MSEC(10));
+			k_sleep(K_MSEC(10U));
 		}
 	}
 }
